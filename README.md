@@ -1,6 +1,6 @@
 # Fleet Management System & Fleet Intelligence Extension
 
-A comprehensive Fleet & Operations Management Platform prototype featuring automated GPS telematics integration, rule-based fuel card reconciliation, driver intelligence, and multi-dimensional utilisation analytics.
+A comprehensive Fleet & Operations Management Platform prototype featuring automated GPS telematics integration, rule-based fuel card reconciliation, driver intelligence, multi-dimensional utilisation analytics, and a dynamic System Settings management feature.
 
 > **Prototype / design disclaimer** — this is a software prototype and MVP. All seed data is fictional — **DEMO / NOT REAL DATA**.
 
@@ -11,7 +11,7 @@ An end-to-end digital fleet management chain covering:
 ```
 Vehicle & Driver Register → GPS Telematics → Fuel Card / Depot Ingest →
 Rule Engine Reconciliation → Exception Centre → Maintenance Scheduling →
-Utilisation & Driver Safety Analytics
+Utilisation & Driver Safety Analytics → Dynamic System Settings
 ```
 
 ## Quick start (local dev)
@@ -35,8 +35,9 @@ email:    admin@dspng.tech
 password: Admin@2026
 ```
 
-## Fleet Intelligence Extension Features
+## Features
 
+- **Dynamic System Settings**: Fully functional System Settings form (`/settings`) backed by a `business_rules` table, allowing administrators to configure operational parameters (max reconciliation variance %, default currency, payment terms, calibration periods, and negative inventory permissions) with type validation and full audit logging.
 - **GPS Telematics Ingest**: Telemetry endpoint (`POST /api/v1/gps/positions`) capturing speed, heading, ignition state, odometer, and geofence status with live caching.
 - **Interactive Live Fleet Map**: Interactive Leaflet map (`/live-map`) with status-coded vehicle markers (moving, idle, stationary, offline, in repair), popups, and click-to-detail profile navigation.
 - **Rules-Based Reconciliation Engine**: Automatically checks transactions against station GPS location proximity, tank capacity limits, card/driver assignments, duplicate window checks, after-hours window, and abnormal consumption vs `expected_km_per_l`.

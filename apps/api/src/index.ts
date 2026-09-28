@@ -32,6 +32,7 @@ import fleetOverviewRoutes from "./routes/fleetOverview";
 import exceptionsRoutes from "./routes/exceptions";
 import driverIntelligenceRoutes from "./routes/driverIntelligence";
 import utilisationRoutes from "./routes/utilisation";
+import settingsRoutes from "./routes/settings";
 
 initSchema();
 ensureBootstrapAccounts();
@@ -72,6 +73,7 @@ app.use("/api/v1/fleet", fleetOverviewRoutes);
 app.use("/api/v1/fleet", utilisationRoutes);
 app.use("/api/v1/exceptions", exceptionsRoutes);
 app.use("/api/v1/driver-intelligence", driverIntelligenceRoutes);
+app.use("/api/v1/settings", settingsRoutes);
 
 const webDir = process.env.WEB_DIR || path.join(__dirname, "public");
 if (fs.existsSync(webDir)) {
