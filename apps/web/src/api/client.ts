@@ -39,6 +39,12 @@ export const api = {
   del: <T,>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
+export const apiGet = api.get;
+export const apiPost = api.post;
+export const apiPut = api.put;
+export const apiPatch = api.patch;
+export const apiDel = api.del;
+
 export function setToken(token: string | null) {
   if (token) localStorage.setItem("fms_access_token", token);
   else localStorage.removeItem("fms_access_token");

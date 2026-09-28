@@ -4,10 +4,6 @@ Base URL: `/api/v1`. All endpoints except `/auth/login` and `/auth/refresh`
 require `Authorization: Bearer <accessToken>`. Errors return
 `{ "error": string, "details"?: [...] }` with an appropriate HTTP status.
 
-Full OpenAPI generation is a TODO (see README MVP status); this document is
-the interim reference, grouped exactly as specified in the build brief
-(section 23).
-
 ## Auth — `/api/v1/auth`
 
 | Method | Path | Notes |
@@ -16,112 +12,65 @@ the interim reference, grouped exactly as specified in the build brief
 | POST | `/refresh` | `{ refreshToken }` → `{ accessToken }` |
 | GET | `/me` | Current authenticated user |
 
-Access tokens expire in 15 minutes; refresh tokens in 7 days.
-
-## Airports — `/api/v1/airports`
-
-| Method | Path | Role required |
-|---|---|---|
-| GET | `/` | any authenticated |
-| GET | `/:id` | any authenticated |
-| POST | `/` | admin, national_fuel_manager |
-| PATCH | `/:id` | admin, national_fuel_manager |
-
-## Fuel products — `/api/v1/fuel-products`
-GET (all), POST (admin, national_fuel_manager).
-
-## Tanks — `/api/v1/tanks`
-GET `?airportId=`, GET `/:id`, GET `/:id/ledger`, POST, POST `/:id/reading`.
-
-## Suppliers — `/api/v1/suppliers`
-GET, GET `/:id`, GET `/:id/performance`, POST (admin, procurement_officer).
-
-## Refuellers — `/api/v1/refuellers`
-GET `?airportId=`, POST, PATCH `/:id/status`.
-
-## Airlines / Aircraft / Customers
-`/api/v1/airlines`, `/api/v1/aircraft` (supports `?registration=` search),
-`/api/v1/customers` — standard GET/POST.
-
-## Receipts — `/api/v1/receipts`
+## GPS & Telematics — `/api/v1/gps`
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/?airportId=&status=` | list |
-| GET | `/:id` | detail |
-| POST | `/` | creates in `draft` status |
-| POST | `/:id/transition` | `{ status }`; enforces the workflow state machine draft→submitted→verified→approved→posted |
+| POST | `/positions` | Ingest vehicle GPS telemetry `{ vehicleId, lat, lon, speed, heading, ignition, odometer, geofenceStatus }`. Flags TODO for MQTT gateways. |
+| GET | `/latest` | Get latest GPS positions and status for all active vehicles |
+| GET | `/positions?vehicleId=` | Get breadcrumb GPS position history for a vehicle |
 
-Posting is the only transition that writes to the inventory ledger.
-Posted receipts cannot be transitioned further (immutable per spec section 8).
-
-## Transfers — `/api/v1/transfers`
-GET `?airportId=`, POST — completes immediately (tank↔tank, tank↔refueller).
-
-## Uplifts — `/api/v1/uplifts`
-GET `?airportId=`, GET `/:id`, POST — the core atomic transaction
-(validates stock → deducts inventory → generates invoice → audits, see
-ARCHITECTURE.md).
-
-## Inventory — `/api/v1/inventory`
+## Fuel Transactions — `/api/v1/fuel-transactions`
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/balances?airportId=` | cached current levels |
-| GET | `/balances/:tankId` | single tank balance |
-| GET | `/transactions?tankId=&airportId=&limit=` | ledger rows |
-| POST | `/adjustments` | `{ tankId, quantity, reason }` — reason required, always audited |
+| GET | `/` | List fuel transactions with `?reconciliationStatus=`, `?source=`, `?startDate=`, `?endDate=` |
+| GET | `/:id` | Single transaction detail with linked cards, stations, and exceptions |
+| POST | `/` | Ingest fuel transaction, trigger reconciliation service, compute efficiency metrics |
+| GET | `/cards` | List fuel cards with assigned vehicles and drivers |
+| GET | `/stations` | List fuel stations & depots with GPS coordinates |
 
-## Reconciliation — `/api/v1/reconciliation`
-
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/?airportId=&tankId=&status=` | history |
-| POST | `/run` | `{ tankId, reconDate, actualClosing }` — computes variance, raises alert if beyond threshold |
-| POST | `/:id/approve` | `{ explanation }` — required to close out a flagged variance |
-
-## Billing — `/api/v1/billing`
-`/invoices` (GET, `?airportId=&status=`), `/invoices/:id` (GET, with
-payments), `/invoices/:id/issue` (POST), `/invoices/:id/payments` (POST).
-
-## Quality — `/api/v1/quality`
-GET `?airportId=`, POST — a `fail` result auto-raises a critical alert.
-
-## Maintenance — `/api/v1/maintenance`
-GET `?airportId=&status=`, POST, POST `/:id/complete`.
-
-## Alerts — `/api/v1/alerts`
-GET `?airportId=&status=&severity=`, POST `/:id/resolve`, POST `/:id/assign`.
-
-## Reports / dashboards — `/api/v1/reports`
+## Fleet Overview & Utilisation — `/api/v1/fleet`
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/dashboard/national` | national KPIs, low-stock list, charts data |
-| GET | `/dashboard/airport/:airportId` | airport-level operational view |
-| GET | `/consumption?airportId=&from=&to=` | daily uplift totals |
-| GET | `/revenue?airportId=` | monthly invoiced revenue |
+| GET | `/overview` | Comprehensive dashboard KPI metrics (moving/stationary/idle/offline counts, fuel consumed/cost today, utilisation %, open exceptions) |
+| GET | `/utilisation` | Multi-dimensional utilisation analytics (`?startDate=`, `?endDate=`, `?department=`, `?vehicleId=`, `?type=`, `?location=`) |
 
-## IoT — `/api/v1/iot`
-`/devices` (GET `?airportId=`, POST), `/devices/:id/readings` (GET),
-`/readings` (POST — simulated ingest; see IOT_INTEGRATION.md).
+## Fleet Exceptions — `/api/v1/exceptions`
 
-## Audit logs — `/api/v1/audit-logs`
-GET `?entity=&entityId=&userId=&limit=` — restricted to admin, auditor,
-national_fuel_manager, executive.
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | List exceptions filtered by `?severity=`, `?category=`, `?status=`, `?vehicleId=`, `?driverId=` |
+| GET | `/:id` | Detailed exception record with supporting transaction + GPS position + vehicle + driver |
+| PATCH | `/:id` | Update exception status (`open`, `investigating`, `resolved`, `dismissed`), notes, and resolution text. Writes audit_logs. |
 
-## Users — `/api/v1/users`
-Restricted to admin. GET `/`, GET `/roles`, POST `/`, PATCH `/:id/role`,
-PATCH `/:id/status`.
+## Vehicles & Intelligence — `/api/v1/vehicles`
 
-## Cross-cutting behaviour
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | List vehicles (`?status=`, `?department=`) |
+| GET | `/:id` | Single vehicle details |
+| GET | `/:id/intelligence` | Tabbed intelligence profile (profile, operational state, fuel history, service logs, driver allocations, linked exceptions) |
+| POST | `/` | Create vehicle |
+| PUT | `/:id` | Update vehicle |
+| DELETE | `/:id` | Delete vehicle (prevents deletion if foreign key records exist) |
 
-- **Validation**: all POST/PATCH bodies validated with `zod`; failures
-  return `400` with a `details` array.
-- **Rate limiting**: `express-rate-limit`, 1000 req / 15 min per IP on all
-  `/api` routes.
-- **Pagination/filtering**: implemented per-resource via query params
-  (`?limit=`, `?airportId=`, `?status=`, etc.) rather than a single generic
-  scheme, matching each resource's actual access patterns.
-- **Logging**: `morgan` (dev format locally, combined format in production).
-- **Security headers**: `helmet` on every response.
+## Driver Intelligence — `/api/v1/driver-intelligence`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | List drivers with safety scores (out of 100), risk ratings, speeding/harsh braking telemetry counts, and driver rankings (`?department=`) |
+
+## Vehicle Maintenance — `/api/v1/vehicle-maintenance`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/maintenance` | List maintenance records |
+| POST | `/maintenance` | Schedule or log maintenance work |
+| GET | `/breakdowns` | List reported breakdowns |
+| POST | `/breakdowns` | Report breakdown (triggers alert & sets vehicle status to `under_repair`) |
+| GET | `/schedules` | Odometer and engine-hours based maintenance triggers (`ok`, `due_soon`, `overdue`) |
+
+## Audit Logs — `/api/v1/audit-logs`
+GET `?entity=&entityId=&userId=&limit=` — restricted to admin, auditor, national_fuel_manager, executive.

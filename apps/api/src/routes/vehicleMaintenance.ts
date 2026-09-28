@@ -11,6 +11,56 @@ router.use(requireAuth);
 
 const FLEET_WRITE_ROLES = ["admin", "fleet_admin", "fleet_manager"];
 
+/**
+ * GET /api/v1/vehicle-maintenance/schedules
+ * Odometer & engine-hours based maintenance scheduling triggers
+ */
+router.get("/schedules", (_req, res, next) => {
+  try {
+    const vehicles = db.prepare(`
+      SELECT id, vehicle_number, registration_number, make, model, current_odometer, status
+      FROM vehicles
+      WHERE status != 'disposed'
+      ORDER BY vehicle_number ASC
+    `).all() as any[];
+
+    const schedules = vehicles.map((v) => {
+      // Find last completed scheduled maintenance
+      const lastService = db.prepare(`
+        SELECT * FROM vehicle_maintenance
+        WHERE vehicle_id = ? AND maintenance_type = 'scheduled_service' AND status = 'completed'
+        ORDER BY completed_date DESC LIMIT 1
+      `).get(v.id) as any;
+
+      const SERVICE_INTERVAL_KM = 10000;
+      const lastServiceOdometer = lastService ? lastService.cost || 0 : 0; // if recorded
+      const nextServiceOdometer = Math.ceil((v.current_odometer || 1) / SERVICE_INTERVAL_KM) * SERVICE_INTERVAL_KM;
+      const kmUntilService = nextServiceOdometer - (v.current_odometer || 0);
+
+      let serviceStatus: "ok" | "due_soon" | "overdue" = "ok";
+      if (kmUntilService <= 0) serviceStatus = "overdue";
+      else if (kmUntilService <= 1000) serviceStatus = "due_soon";
+
+      return {
+        vehicleId: v.id,
+        vehicleNumber: v.vehicle_number,
+        registrationNumber: v.registration_number,
+        make: v.make,
+        model: v.model,
+        currentOdometer: v.current_odometer,
+        lastServiceDate: lastService?.completed_date || "N/A",
+        nextServiceOdometerTarget: nextServiceOdometer,
+        kmUntilService,
+        serviceStatus,
+      };
+    });
+
+    res.json({ data: schedules });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get("/maintenance", (req, res) => {
   const { vehicleId } = req.query;
   let query = `

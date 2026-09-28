@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS vehicles (
   insurance_policy TEXT,
   insurance_expiry TEXT,
   registration_expiry TEXT,
+  tank_capacity_litres REAL DEFAULT 80.0,
+  expected_km_per_l REAL DEFAULT 8.0,
+  gps_device_id TEXT,
+  fuel_card_id TEXT,
+  current_odometer REAL DEFAULT 0.0,
+  current_latitude REAL,
+  current_longitude REAL,
+  current_location_name TEXT,
+  last_gps_fix_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -121,6 +130,71 @@ CREATE TABLE IF NOT EXISTS vehicle_allocations (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS gps_devices (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  device_identifier TEXT UNIQUE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'maintenance')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS gps_positions (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  speed REAL NOT NULL DEFAULT 0,
+  heading REAL NOT NULL DEFAULT 0,
+  ignition INTEGER NOT NULL DEFAULT 0,
+  odometer REAL NOT NULL DEFAULT 0,
+  recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+  geofence_status TEXT NOT NULL DEFAULT 'inside'
+);
+
+CREATE TABLE IF NOT EXISTS fuel_cards (
+  id TEXT PRIMARY KEY,
+  card_number TEXT UNIQUE NOT NULL,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  authorised_driver_id TEXT REFERENCES drivers(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'suspended', 'blocked', 'cancelled')),
+  limits TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS fuel_stations (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  code TEXT UNIQUE NOT NULL,
+  station_type TEXT NOT NULL DEFAULT 'station' CHECK(station_type IN ('station', 'depot')),
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  address TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS geofences (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  radius_meters REAL NOT NULL DEFAULT 1000,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS driver_events (
+  id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL CHECK(event_type IN ('speeding', 'harsh_braking', 'harsh_accel', 'excessive_idling')),
+  vehicle_id TEXT REFERENCES vehicles(id),
+  driver_id TEXT REFERENCES drivers(id),
+  recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+  value REAL NOT NULL DEFAULT 0,
+  lat REAL,
+  lon REAL
+);
+
 CREATE TABLE IF NOT EXISTS vehicle_fuel_logs (
   id TEXT PRIMARY KEY,
   vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
@@ -138,7 +212,29 @@ CREATE TABLE IF NOT EXISTS vehicle_fuel_logs (
   l_per_100km REAL,
   km_per_l REAL,
   cost_per_km REAL,
+  fuel_card_id TEXT REFERENCES fuel_cards(id),
+  station_id TEXT REFERENCES fuel_stations(id),
+  source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('card', 'depot', 'manual')),
+  gps_verified INTEGER NOT NULL DEFAULT 0,
+  reconciliation_status TEXT NOT NULL DEFAULT 'pending' CHECK(reconciliation_status IN ('verified', 'exception', 'pending')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS fleet_exceptions (
+  id TEXT PRIMARY KEY,
+  severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
+  category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance')),
+  rule_code TEXT NOT NULL,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  driver_id TEXT REFERENCES drivers(id),
+  transaction_id TEXT REFERENCES vehicle_fuel_logs(id),
+  gps_position_id TEXT REFERENCES gps_positions(id),
+  description TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'investigating', 'resolved', 'dismissed')),
+  notes TEXT,
+  resolution TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS vehicle_trips (
@@ -223,7 +319,40 @@ CREATE TABLE IF NOT EXISTS vehicle_disposals (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- View for current vehicle status
+DROP VIEW IF EXISTS vehicle_status_view;
+CREATE VIEW vehicle_status_view AS
+SELECT
+  v.id AS vehicle_id,
+  v.vehicle_number,
+  v.registration_number,
+  v.status AS raw_vehicle_status,
+  gp.speed,
+  gp.heading,
+  gp.ignition,
+  gp.recorded_at AS last_gps_fix,
+  CASE
+    WHEN v.status = 'under_repair' THEN 'under_maintenance'
+    WHEN v.status = 'inactive' OR v.status = 'disposed' THEN 'unassigned'
+    WHEN gp.recorded_at IS NULL OR datetime(gp.recorded_at) < datetime('now', '-2 hours') THEN 'offline'
+    WHEN gp.ignition = 1 AND gp.speed > 5 THEN 'moving'
+    WHEN gp.ignition = 1 AND gp.speed <= 5 THEN 'idle'
+    ELSE 'stationary'
+  END AS computed_status
+FROM vehicles v
+LEFT JOIN (
+  SELECT p1.*
+  FROM gps_positions p1
+  INNER JOIN (
+    SELECT vehicle_id, MAX(recorded_at) as max_rec
+    FROM gps_positions
+    GROUP BY vehicle_id
+  ) p2 ON p1.vehicle_id = p2.vehicle_id AND p1.recorded_at = p2.max_rec
+) gp ON v.id = gp.vehicle_id;
+
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_vehicles_status ON vehicles(status);
 CREATE INDEX IF NOT EXISTS idx_fuel_logs_vehicle ON vehicle_fuel_logs(vehicle_id);
 CREATE INDEX IF NOT EXISTS idx_trips_vehicle ON vehicle_trips(vehicle_id);
+CREATE INDEX IF NOT EXISTS idx_gps_positions_vehicle ON gps_positions(vehicle_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_exceptions_status ON fleet_exceptions(status, severity);
