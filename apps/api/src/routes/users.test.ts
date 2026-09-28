@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import express from "express";
 import usersRouter from "./users";
-import { db } from "../db";
+import { db, initSchema } from "../db";
 import { v4 as uuid } from "uuid";
 
 describe("Users router endpoints unit test", () => {
@@ -10,6 +9,7 @@ describe("Users router endpoints unit test", () => {
   let adminRoleId: string;
 
   beforeAll(() => {
+    initSchema();
     // ensure admin role exists
     const role = db.prepare(`SELECT id FROM roles WHERE name = 'admin'`).get() as any;
     adminRoleId = role ? role.id : uuid();

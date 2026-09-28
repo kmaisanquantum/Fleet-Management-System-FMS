@@ -34,6 +34,124 @@ router.get("/:id", (req, res) => {
   res.json({ data: vehicle });
 });
 
+/**
+ * GET /api/v1/vehicles/:id/intelligence
+ * Tabbed intelligence profile (profile, operational, fuel, maintenance, driver, exceptions)
+ */
+router.get("/:id/intelligence", (req, res, next) => {
+  try {
+    const vehicleId = req.params.id;
+    const profile = db.prepare(`
+      SELECT
+        v.*,
+        vsv.computed_status,
+        fc.card_number,
+        gd.device_identifier
+      FROM vehicles v
+      LEFT JOIN vehicle_status_view vsv ON vsv.vehicle_id = v.id
+      LEFT JOIN fuel_cards fc ON fc.id = v.fuel_card_id
+      LEFT JOIN gps_devices gd ON gd.id = v.gps_device_id
+      WHERE v.id = ?
+    `).get(vehicleId) as any;
+
+    if (!profile) {
+      return res.status(404).json({ error: "Vehicle not found" });
+    }
+
+    // Operational: latest GPS position
+    const latestGps = db.prepare(`
+      SELECT * FROM gps_positions
+      WHERE vehicle_id = ?
+      ORDER BY recorded_at DESC
+      LIMIT 1
+    `).get(vehicleId);
+
+    // Operational: Trips summary
+    const tripSummary = db.prepare(`
+      SELECT
+        COUNT(*) as total_trips,
+        COALESCE(SUM(total_km), 0) as total_distance_km
+      FROM vehicle_trips
+      WHERE vehicle_id = ?
+    `).get(vehicleId);
+
+    // Fuel: Logs & aggregates
+    const fuelLogs = db.prepare(`
+      SELECT fl.*, fs.name as station_name
+      FROM vehicle_fuel_logs fl
+      LEFT JOIN fuel_stations fs ON fs.id = fl.station_id
+      WHERE fl.vehicle_id = ?
+      ORDER BY fl.date DESC, fl.created_at DESC
+      LIMIT 10
+    `).all(vehicleId);
+
+    const fuelSummary = db.prepare(`
+      SELECT
+        COUNT(*) as total_refuels,
+        COALESCE(SUM(litres), 0) as total_litres,
+        COALESCE(SUM(total_cost), 0) as total_cost,
+        COALESCE(AVG(km_per_l), 0) as avg_km_per_l,
+        SUM(CASE WHEN reconciliation_status = 'verified' THEN 1 ELSE 0 END) as verified_count,
+        SUM(CASE WHEN reconciliation_status = 'exception' THEN 1 ELSE 0 END) as exception_count
+      FROM vehicle_fuel_logs
+      WHERE vehicle_id = ?
+    `).get(vehicleId);
+
+    // Maintenance: Past & scheduled
+    const maintenanceRecords = db.prepare(`
+      SELECT * FROM vehicle_maintenance
+      WHERE vehicle_id = ?
+      ORDER BY scheduled_date DESC
+    `).all(vehicleId);
+
+    // Driver: Current allocation & history
+    const allocations = db.prepare(`
+      SELECT va.*, d.name as driver_name, d.employee_number, d.licence_number
+      FROM vehicle_allocations va
+      LEFT JOIN drivers d ON d.id = va.driver_id
+      WHERE va.vehicle_id = ?
+      ORDER BY va.allocation_date DESC
+    `).all(vehicleId);
+
+    // Exceptions
+    const exceptions = db.prepare(`
+      SELECT * FROM fleet_exceptions
+      WHERE vehicle_id = ?
+      ORDER BY created_at DESC
+    `).all(vehicleId);
+
+    res.json({
+      data: {
+        profile,
+        operational: {
+          currentStatus: profile.computed_status || profile.status,
+          currentOdometer: profile.current_odometer,
+          currentLatitude: profile.current_latitude,
+          currentLongitude: profile.current_longitude,
+          lastGpsFixAt: profile.last_gps_fix_at,
+          latestGps,
+          tripSummary,
+        },
+        fuel: {
+          summary: fuelSummary,
+          recentLogs: fuelLogs,
+          cardInfo: profile.card_number ? { id: profile.fuel_card_id, number: profile.card_number } : null,
+        },
+        maintenance: {
+          records: maintenanceRecords,
+        },
+        driver: {
+          allocations,
+          currentDriver: allocations.find((a: any) => a.authorisation_status === "active") || null,
+        },
+        exceptions,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
 const vehicleSchema = z.object({
   vehicleNumber: z.string().min(1),
   registrationNumber: z.string().min(1),
@@ -55,6 +173,8 @@ const vehicleSchema = z.object({
   insurancePolicy: z.string().optional(),
   insuranceExpiry: z.string().optional(),
   registrationExpiry: z.string().optional(),
+  tankCapacityLitres: z.number().optional(),
+  expectedKmPerL: z.number().optional(),
 });
 
 router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
@@ -66,12 +186,12 @@ router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
         id, vehicle_number, registration_number, make, model, year, vehicle_type,
         chassis_vin, engine_number, colour, fuel_type, department, location, status,
         acquisition_date, acquisition_cost, current_value, ownership, insurance_policy,
-        insurance_expiry, registration_expiry
+        insurance_expiry, registration_expiry, tank_capacity_litres, expected_km_per_l
       ) VALUES (
         @id, @vehicleNumber, @registrationNumber, @make, @model, @year, @vehicleType,
         @chassisVin, @engineNumber, @colour, @fuelType, @department, @location, @status,
         @acquisitionDate, @acquisitionCost, @currentValue, @ownership, @insurancePolicy,
-        @insuranceExpiry, @registrationExpiry
+        @insuranceExpiry, @registrationExpiry, @tankCapacityLitres, @expectedKmPerL
       )
     `).run({
       id,
@@ -95,6 +215,8 @@ router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
       insurancePolicy: input.insurancePolicy ?? null,
       insuranceExpiry: input.insuranceExpiry ?? null,
       registrationExpiry: input.registrationExpiry ?? null,
+      tankCapacityLitres: input.tankCapacityLitres ?? 80.0,
+      expectedKmPerL: input.expectedKmPerL ?? 8.0,
     });
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_CREATED", entity: "vehicles", entityId: id, newValue: input });
@@ -130,6 +252,8 @@ router.put("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
         insurance_policy = COALESCE(@insurancePolicy, insurance_policy),
         insurance_expiry = COALESCE(@insuranceExpiry, insurance_expiry),
         registration_expiry = COALESCE(@registrationExpiry, registration_expiry),
+        tank_capacity_litres = COALESCE(@tankCapacityLitres, tank_capacity_litres),
+        expected_km_per_l = COALESCE(@expectedKmPerL, expected_km_per_l),
         updated_at = datetime('now')
       WHERE id = @id
     `).run({
@@ -153,6 +277,8 @@ router.put("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
       insurancePolicy: input.insurancePolicy ?? null,
       insuranceExpiry: input.insuranceExpiry ?? null,
       registrationExpiry: input.registrationExpiry ?? null,
+      tankCapacityLitres: input.tankCapacityLitres ?? null,
+      expectedKmPerL: input.expectedKmPerL ?? null,
     });
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_UPDATED", entity: "vehicles", entityId: req.params.id, previousValue: existing, newValue: input });

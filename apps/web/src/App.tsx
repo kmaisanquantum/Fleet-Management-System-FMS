@@ -3,6 +3,12 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 import AppShell from "./components/AppShell";
 import Login from "./pages/Login";
 import FleetDashboard from "./pages/FleetDashboard";
+import LiveFleetMap from "./pages/LiveFleetMap";
+import ExceptionCentre from "./pages/ExceptionCentre";
+import FuelIntelligence from "./pages/FuelIntelligence";
+import DriverIntelligence from "./pages/DriverIntelligence";
+import Utilisation from "./pages/Utilisation";
+import VehicleDetail from "./pages/VehicleDetail";
 import DivisionConsumption from "./pages/DivisionConsumption";
 import Vehicles from "./pages/Vehicles";
 import Drivers from "./pages/Drivers";
@@ -45,6 +51,13 @@ function AppRoutes() {
       >
         <Route path="/" element={<Navigate to="/fleet" replace />} />
         <Route path="/fleet" element={<FleetDashboard />} />
+        <Route path="/live-map" element={<LiveFleetMap />} />
+        <Route path="/exceptions" element={<ExceptionCentre />} />
+        <Route path="/fuel-intelligence" element={<FuelIntelligence />} />
+        <Route path="/driver-intelligence" element={<DriverIntelligence />} />
+        <Route path="/utilisation" element={<Utilisation />} />
+        <Route path="/vehicles/:id" element={<VehicleDetail />} />
+
         <Route path="/fleet-consumption" element={<DivisionConsumption />} />
         <Route path="/vehicles" element={<Vehicles />} />
         <Route path="/drivers" element={<Drivers />} />

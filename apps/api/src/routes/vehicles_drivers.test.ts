@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { db } from "../db";
+import { db, initSchema } from "../db";
 import { v4 as uuid } from "uuid";
 import { writeAudit } from "../utils/audit";
 
@@ -10,6 +10,7 @@ describe("Vehicles and Drivers deletion and audit tests", () => {
   let driverWithFkId: string;
 
   beforeAll(() => {
+    initSchema();
     const s = uuid().substring(0, 6);
     vehicleId = uuid();
     db.prepare(`

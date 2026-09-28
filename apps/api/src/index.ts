@@ -26,6 +26,13 @@ import vehicleMaintenanceRoutes from "./routes/vehicleMaintenance";
 import fleetDashboardRoutes from "./routes/fleetDashboard";
 import fleetAnalyticsRoutes from "./routes/fleetAnalytics";
 
+import gpsRoutes from "./routes/gps";
+import fuelTransactionsRoutes from "./routes/fuelTransactions";
+import fleetOverviewRoutes from "./routes/fleetOverview";
+import exceptionsRoutes from "./routes/exceptions";
+import driverIntelligenceRoutes from "./routes/driverIntelligence";
+import utilisationRoutes from "./routes/utilisation";
+
 initSchema();
 ensureBootstrapAccounts();
 
@@ -58,6 +65,13 @@ app.use("/api/v1/vehicle-inspections", vehicleInspectionsRoutes);
 app.use("/api/v1/vehicle-maintenance", vehicleMaintenanceRoutes);
 app.use("/api/v1/fleet-dashboard", fleetDashboardRoutes);
 app.use("/api/v1/fleet-analytics", fleetAnalyticsRoutes);
+
+app.use("/api/v1/gps", gpsRoutes);
+app.use("/api/v1/fuel-transactions", fuelTransactionsRoutes);
+app.use("/api/v1/fleet", fleetOverviewRoutes);
+app.use("/api/v1/fleet", utilisationRoutes);
+app.use("/api/v1/exceptions", exceptionsRoutes);
+app.use("/api/v1/driver-intelligence", driverIntelligenceRoutes);
 
 const webDir = process.env.WEB_DIR || path.join(__dirname, "public");
 if (fs.existsSync(webDir)) {

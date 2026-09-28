@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
 const NAV_GROUPS: {
@@ -8,10 +8,19 @@ const NAV_GROUPS: {
   items: { to: string; label: string; adminOnly?: boolean }[];
 }[] = [
   {
-    title: "Fleet Management",
+    title: "Fleet Intelligence",
     items: [
-      { to: "/fleet", label: "Fleet Dashboard" },
-      { to: "/fleet-consumption", label: "Division Analytics" },
+      { to: "/fleet", label: "Fleet Overview" },
+      { to: "/live-map", label: "Live Fleet Map" },
+      { to: "/exceptions", label: "Exception Centre" },
+      { to: "/fuel-intelligence", label: "Fuel Intelligence" },
+      { to: "/driver-intelligence", label: "Driver Intelligence" },
+      { to: "/utilisation", label: "Utilisation Analytics" },
+    ],
+  },
+  {
+    title: "Operations & Register",
+    items: [
       { to: "/vehicles", label: "Vehicles Register" },
       { to: "/drivers", label: "Driver Register" },
       { to: "/fleet-allocations", label: "Allocations" },
@@ -19,6 +28,7 @@ const NAV_GROUPS: {
       { to: "/fleet-trips", label: "Trips & Mileage" },
       { to: "/fleet-inspections", label: "Daily Inspections" },
       { to: "/fleet-maintenance", label: "Maintenance & Repairs" },
+      { to: "/fleet-consumption", label: "Division Analytics" },
     ],
   },
   {
@@ -36,7 +46,6 @@ const NAV_GROUPS: {
 export default function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
   const [navOpen, setNavOpen] = useState(false);
 
   const visibleNavGroups = NAV_GROUPS.map((group) => {
@@ -89,7 +98,7 @@ export default function AppShell() {
           <div>
             <div className="font-display font-semibold text-lg leading-tight text-ink-100">Fleet</div>
             <div className="font-display font-semibold text-lg leading-tight text-amber-400">Management System</div>
-            <div className="text-[10px] uppercase tracking-widest text-ink-500 mt-1">Fleet & Operations Platform</div>
+            <div className="text-[10px] uppercase tracking-widest text-ink-500 mt-1">Intelligence Platform</div>
           </div>
           <button
             type="button"
