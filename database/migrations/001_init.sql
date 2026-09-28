@@ -31,6 +31,16 @@ CREATE TABLE role_permissions (
   PRIMARY KEY (role_id, permission_code)
 );
 
+CREATE TABLE business_rules (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  value_type TEXT NOT NULL CHECK (value_type IN ('number', 'string', 'boolean')),
+  label TEXT,
+  description TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by UUID REFERENCES users(id)
+);
+
 -- =========================================================================
 -- Master data: airports (not hard-coded), facilities, products
 -- =========================================================================

@@ -11,7 +11,7 @@ console.log("Seeding Fleet Management System & Intelligence data...");
 
 // Wipe existing data for clean seed
 const tables = [
-  "fleet_exceptions", "driver_events", "geofences", "gps_positions",
+  "business_rules", "fleet_exceptions", "driver_events", "geofences", "gps_positions",
   "gps_devices", "vehicle_fuel_logs", "fuel_cards", "fuel_stations",
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
@@ -56,6 +56,22 @@ function makeUser(email: string, fullName: string, role: string) {
 const adminId = makeUser("admin@dspng.tech", "Admin User", "admin");
 makeUser("fleetmgr@dspng.tech", "Fleet Manager", "fleet_manager");
 makeUser("driver1@dspng.tech", "John Driver", "driver");
+
+// --- Business Rules ---
+const BUSINESS_RULES = [
+  { key: "max_allowed_variance_pct", value: "0.5", value_type: "number", label: "Max allowed reconciliation variance (%)", description: "Maximum percentage variance allowed during daily fuel stock reconciliation before an alert is flagged." },
+  { key: "default_currency", value: "PGK", value_type: "string", label: "Default currency", description: "Base operating currency code (e.g. PGK, AUD, USD)." },
+  { key: "invoice_payment_terms_days", value: "30", value_type: "number", label: "Invoice payment terms (days)", description: "Default payment due window in days for customer fuel uplift invoices." },
+  { key: "default_calibration_period_months", value: "12", value_type: "number", label: "Calibration period (default months)", description: "Standard calibration validity period in months for meters and storage tanks." },
+  { key: "negative_inventory_allowed", value: "false", value_type: "boolean", label: "Negative inventory allowed", description: "Allows stock withdrawals below zero balance when set to true." },
+];
+
+for (const rule of BUSINESS_RULES) {
+  db.prepare(`
+    INSERT INTO business_rules (key, value, value_type, label, description, updated_at, updated_by)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+  `).run(rule.key, rule.value, rule.value_type, rule.label, rule.description, adminId);
+}
 
 // --- Fuel Stations & Depots ---
 const STATIONS = [
@@ -382,4 +398,4 @@ db.prepare(`
   )
 `).run(uuid(), VEHICLES[0].id);
 
-console.log("Seed complete: Intelligence data, GPS positions, Fuel cards, Stations, and Fleet Exceptions populated.");
+console.log("Seed complete: Intelligence data, GPS positions, Fuel cards, Stations, Business Rules, and Fleet Exceptions populated.");

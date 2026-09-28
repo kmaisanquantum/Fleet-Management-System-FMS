@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS users (
   updated_by TEXT
 );
 
+CREATE TABLE IF NOT EXISTS business_rules (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  value_type TEXT NOT NULL CHECK(value_type IN ('number', 'string', 'boolean')),
+  label TEXT,
+  description TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by TEXT REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS alerts (
   id TEXT PRIMARY KEY,
   severity TEXT NOT NULL, -- critical | warning

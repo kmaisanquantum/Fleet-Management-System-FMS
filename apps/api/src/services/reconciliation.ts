@@ -1,5 +1,10 @@
 import { db } from "../db";
 import { v4 as uuid } from "uuid";
+import { getBusinessRuleNumber } from "../routes/settings";
+
+export function getMaxAllowedVariancePct(): number {
+  return getBusinessRuleNumber("max_allowed_variance_pct", "MAX_ALLOWED_VARIANCE_PCT", 0.5);
+}
 
 export interface FuelTransactionInput {
   id?: string;

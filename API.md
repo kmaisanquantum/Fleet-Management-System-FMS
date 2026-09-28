@@ -12,6 +12,13 @@ require `Authorization: Bearer <accessToken>`. Errors return
 | POST | `/refresh` | `{ refreshToken }` → `{ accessToken }` |
 | GET | `/me` | Current authenticated user |
 
+## System Settings — `/api/v1/settings`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | List all business rules & settings |
+| PUT | `/` | Update business rule values (Admin only; validates value_type and writes audit_logs) |
+
 ## GPS & Telematics — `/api/v1/gps`
 
 | Method | Path | Notes |
