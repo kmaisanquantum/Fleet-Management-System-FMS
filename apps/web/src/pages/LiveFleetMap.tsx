@@ -61,7 +61,7 @@ export default function LiveFleetMap() {
     ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=${cartoApiKey}`
     : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
 
-  const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL;
+  const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL || "https://meshsat.dspng.space/map";
 
   const [activeTab, setActiveTab] = useState<"fms" | "meshsat">("fms");
   const [vehicles, setVehicles] = useState<VehicleGpsData[]>([]);
