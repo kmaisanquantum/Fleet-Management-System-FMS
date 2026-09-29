@@ -61,15 +61,6 @@ export default function LiveFleetMap() {
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
-  const mapTilerKey = (import.meta as any).env?.VITE_MAPTILER_KEY;
-  const tileUrl = mapTilerKey
-    ? `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${mapTilerKey}`
-    : "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
-
-  const tileAttribution = mapTilerKey
-    ? '&copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
-
   useEffect(() => {
     loadLatestGps();
     const interval = setInterval(loadLatestGps, 15000); // refresh every 15s
@@ -154,8 +145,9 @@ export default function LiveFleetMap() {
             style={{ height: "100%", width: "100%", background: "#0f172a" }}
           >
             <TileLayer
-              attribution={tileAttribution}
-              url={tileUrl}
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+              url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+              subdomains={["a", "b", "c", "d"]}
             />
             {filteredVehicles.map((v) => {
               if (!v.current_latitude || !v.current_longitude) return null;
