@@ -61,6 +61,9 @@ export default function LiveFleetMap() {
     ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=${cartoApiKey}`
     : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
 
+  const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL;
+
+  const [activeTab, setActiveTab] = useState<"fms" | "meshsat">("fms");
   const [vehicles, setVehicles] = useState<VehicleGpsData[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<string>("all");
@@ -108,37 +111,85 @@ export default function LiveFleetMap() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-ink-100">Live Fleet Map & Telematics</h1>
-          <p className="text-sm text-ink-400">Real-time GPS vehicle tracking, ignition status, speed, and geofence monitoring</p>
+          <p className="text-sm text-ink-400">Real-time GPS vehicle tracking, MeshSat satellite/radio network, ignition status, and speed monitoring</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="text"
-            placeholder="Search vehicle / driver…"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="input text-xs w-48 bg-base-900 border-base-700 text-ink-100"
-          />
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="input text-xs w-40 bg-base-900 border-base-700 text-ink-100"
-          >
-            <option value="all">All Statuses</option>
-            <option value="moving">Moving</option>
-            <option value="idle">Idle</option>
-            <option value="stationary">Stationary</option>
-            <option value="offline">Offline</option>
-            <option value="under_maintenance">Under Maintenance</option>
-          </select>
-          <button onClick={loadLatestGps} className="btn-secondary text-xs px-3 py-2">
-            🔄 Refresh
-          </button>
+          {activeTab === "fms" && (
+            <>
+              <input
+                type="text"
+                placeholder="Search vehicle / driver…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="input text-xs w-48 bg-base-900 border-base-700 text-ink-100"
+              />
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                className="input text-xs w-40 bg-base-900 border-base-700 text-ink-100"
+              >
+                <option value="all">All Statuses</option>
+                <option value="moving">Moving</option>
+                <option value="idle">Idle</option>
+                <option value="stationary">Stationary</option>
+                <option value="offline">Offline</option>
+                <option value="under_maintenance">Under Maintenance</option>
+              </select>
+              <button onClick={loadLatestGps} className="btn-secondary text-xs px-3 py-2">
+                🔄 Refresh
+              </button>
+            </>
+          )}
         </div>
+      </div>
+
+      {/* View Switcher Tabs */}
+      <div className="flex border-b border-base-700 space-x-4">
+        <button
+          onClick={() => setActiveTab("fms")}
+          className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "fms"
+              ? "border-amber-500 text-amber-500 font-semibold"
+              : "border-transparent text-ink-400 hover:text-ink-200"
+          }`}
+        >
+          🛰️ FMS Telematics Map
+        </button>
+        <button
+          onClick={() => setActiveTab("meshsat")}
+          className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "meshsat"
+              ? "border-amber-500 text-amber-500 font-semibold"
+              : "border-transparent text-ink-400 hover:text-ink-200"
+          }`}
+        >
+          📡 MeshSat Mesh Map
+        </button>
       </div>
 
       {/* Map Container */}
       <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[600px] relative">
-        {loading ? (
+        {activeTab === "meshsat" ? (
+          meshsatMapUrl ? (
+            <iframe
+              src={meshsatMapUrl}
+              className="w-full h-full border-0"
+              title="MeshSat Map"
+              allow="geolocation"
+            />
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-ink-400 space-y-3 p-6 text-center">
+              <div className="text-4xl">📡</div>
+              <p className="text-base font-semibold text-ink-200">MeshSat Map Endpoint Unconfigured</p>
+              <p className="text-xs max-w-md text-ink-400">
+                To view the embedded MeshSat mesh network map, set <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">VITE_MESHSAT_MAP_URL</code> (e.g. <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">https://mesh.dspng.tech/map</code>) in the environment during web build.
+              </p>
+              <p className="text-xs text-ink-500 max-w-md">
+                Note: The URL must use HTTPS to prevent browser mixed-content iframe blocking on HTTPS deployment sites.
+              </p>
+            </div>
+          )
+        ) : loading ? (
           <div className="h-full flex items-center justify-center text-ink-400">
             Loading telematics map…
           </div>

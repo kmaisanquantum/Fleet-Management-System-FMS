@@ -132,3 +132,21 @@ curl -X POST http://localhost:6055/webhook \
 ```
 
 Upon sending test packets, verify that the corresponding vehicle moves live on the **Live Fleet Map** (`https://fleet.dspng.tech/live-map`).
+
+---
+
+## 6. Live Fleet Map Embedded MeshSat View
+
+The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) includes a view switcher tab ("FMS Telematics Map" / "MeshSat Mesh Map") allowing users to view the live MeshSat node map iframe directly in the FMS dashboard.
+
+### HTTPS Reverse Proxy Requirement (Mixed Content)
+
+Because `fleet.dspng.tech` is served over **HTTPS**, direct iframe embedding of an HTTP URL (`http://45.76.122.53:6050`) will be blocked by browsers due to mixed-content security rules.
+
+To expose MeshSat securely for embedded viewing:
+1. Setup a reverse proxy on the MeshSat VPS (e.g. Caddy or Nginx) with a TLS certificate for `https://mesh.dspng.tech` pointing to `localhost:6050`.
+2. Ensure MeshSat response headers do not restrict framing (`X-Frame-Options: ALLOW-FROM https://fleet.dspng.tech` or omitting `X-Frame-Options: DENY`, and relaxing `Content-Security-Policy frame-ancestors`).
+3. Set the Vite build environment variable during deployment:
+   ```env
+   VITE_MESHSAT_MAP_URL=https://mesh.dspng.tech/map
+   ```
