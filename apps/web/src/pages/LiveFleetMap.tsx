@@ -56,6 +56,11 @@ function createStatusIcon(status: string) {
 }
 
 export default function LiveFleetMap() {
+  const cartoApiKey = import.meta.env.VITE_CARTO_API_KEY;
+  const tileUrl = cartoApiKey
+    ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=${cartoApiKey}`
+    : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+
   const [vehicles, setVehicles] = useState<VehicleGpsData[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<string>("all");
@@ -146,7 +151,7 @@ export default function LiveFleetMap() {
           >
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-              url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+              url={tileUrl}
               subdomains={["a", "b", "c", "d"]}
             />
             {filteredVehicles.map((v) => {
