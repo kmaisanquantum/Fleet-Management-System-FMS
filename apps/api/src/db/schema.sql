@@ -158,6 +158,9 @@ CREATE TABLE IF NOT EXISTS gps_positions (
   heading REAL NOT NULL DEFAULT 0,
   ignition INTEGER NOT NULL DEFAULT 0,
   odometer REAL NOT NULL DEFAULT 0,
+  altitude_m REAL,
+  battery_pct REAL,
+  source TEXT NOT NULL DEFAULT 'telemetry',
   recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
   geofence_status TEXT NOT NULL DEFAULT 'inside'
 );

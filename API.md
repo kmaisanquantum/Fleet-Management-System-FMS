@@ -1,8 +1,7 @@
 # API Reference
 
 Base URL: `/api/v1`. All endpoints except `/auth/login` and `/auth/refresh`
-require `Authorization: Bearer <accessToken>`. Errors return
-`{ "error": string, "details"?: [...] }` with an appropriate HTTP status.
+require `Authorization: Bearer <accessToken>`. For telemetry ingestion (`POST /gps/positions`), machine requests may optionally authenticate using `x-api-key: <TELEMETRY_API_KEY>`.
 
 ## Auth — `/api/v1/auth`
 
@@ -23,9 +22,11 @@ require `Authorization: Bearer <accessToken>`. Errors return
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/positions` | Ingest vehicle GPS telemetry `{ vehicleId, lat, lon, speed, heading, ignition, odometer, geofenceStatus }`. Flags TODO for MQTT gateways. |
-| GET | `/latest` | Get latest GPS positions and status for all active vehicles |
+| POST | `/positions` | Ingest vehicle GPS telemetry `{ vehicleId, deviceIdentifier, lat, lon, speed, heading, ignition, odometer, altitude, battery, source, recordedAt }`. Supports JWT Bearer OR `x-api-key` header. |
+| GET | `/latest` | Get latest GPS positions, speed, ignition, altitude, battery, and status for active vehicles |
 | GET | `/positions?vehicleId=` | Get breadcrumb GPS position history for a vehicle |
+| GET | `/devices` | List registered GPS/MeshSat telemetry devices and vehicle bindings |
+| POST | `/devices` | Register or update a GPS device binding (`deviceIdentifier`, `vehicleId`, `status`). Admin/Fleet Manager. |
 
 ## Fuel Transactions — `/api/v1/fuel-transactions`
 

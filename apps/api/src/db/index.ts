@@ -35,4 +35,20 @@ export function initSchema() {
 
   const schema = fs.readFileSync(schemaPath, "utf-8");
   db.exec(schema);
+
+  // Check & migrate columns for existing SQLite databases
+  try {
+    const gpsCols = db.prepare("PRAGMA table_info(gps_positions)").all() as { name: string }[];
+    const colNames = gpsCols.map((c) => c.name);
+
+    if (!colNames.includes("altitude_m")) {
+      db.exec("ALTER TABLE gps_positions ADD COLUMN altitude_m REAL;");
+    }
+    if (!colNames.includes("battery_pct")) {
+      db.exec("ALTER TABLE gps_positions ADD COLUMN battery_pct REAL;");
+    }
+    if (!colNames.includes("source")) {
+      db.exec("ALTER TABLE gps_positions ADD COLUMN source TEXT NOT NULL DEFAULT 'telemetry';");
+    }
+  } catch (e) {}
 }
