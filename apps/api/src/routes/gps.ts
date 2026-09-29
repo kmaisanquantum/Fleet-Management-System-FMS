@@ -2,11 +2,11 @@ import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { z } from "zod";
 import { db } from "../db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, apiKeyOrAuth } from "../middleware/auth";
+import { requireRole } from "../middleware/rbac";
 import { writeAudit } from "../utils/audit";
 
 const router = Router();
-router.use(requireAuth);
 
 const gpsPositionSchema = z.object({
   vehicleId: z.string().optional(),
@@ -17,16 +17,19 @@ const gpsPositionSchema = z.object({
   heading: z.number().default(0),
   ignition: z.number().int().min(0).max(1).default(0),
   odometer: z.number().default(0),
+  altitude: z.number().optional(),
+  battery: z.number().optional(),
+  source: z.string().default("telemetry"),
   recordedAt: z.string().optional(),
   geofenceStatus: z.string().default("inside"),
 });
 
 /**
  * POST /api/v1/gps/positions
- * Simulated Telematics/GPS Telemetry Ingest Endpoint
- * TODO / FUTURE: Integrate with MQTT/HTTP webhook from real telematics gateway (e.g., Geotab, Teltonika).
+ * Telematics/GPS Telemetry Ingest Endpoint
+ * Supports Machine-to-Machine ingest via x-api-key header OR authenticated user JWT token.
  */
-router.post("/positions", (req, res, next) => {
+router.post("/positions", apiKeyOrAuth, (req, res, next) => {
   try {
     const input = gpsPositionSchema.parse(req.body);
 
@@ -37,16 +40,33 @@ router.post("/positions", (req, res, next) => {
     }
 
     if (!vehicleId) {
-      return res.status(400).json({ error: "vehicleId or valid deviceIdentifier is required" });
+      return res.status(400).json({
+        error: "Unknown device or missing vehicle binding",
+        details: `No active vehicle found associated with deviceIdentifier '${input.deviceIdentifier || "unspecified"}'`,
+      });
     }
 
     const recordedAt = input.recordedAt || new Date().toISOString().replace("T", " ").substring(0, 19);
     const posId = uuid();
 
     db.prepare(`
-      INSERT INTO gps_positions (id, vehicle_id, lat, lon, speed, heading, ignition, odometer, recorded_at, geofence_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(posId, vehicleId, input.lat, input.lon, input.speed, input.heading, input.ignition, input.odometer, recordedAt, input.geofenceStatus);
+      INSERT INTO gps_positions (id, vehicle_id, lat, lon, speed, heading, ignition, odometer, altitude_m, battery_pct, source, recorded_at, geofence_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      posId,
+      vehicleId,
+      input.lat,
+      input.lon,
+      input.speed,
+      input.heading,
+      input.ignition,
+      input.odometer,
+      input.altitude ?? null,
+      input.battery ?? null,
+      input.source,
+      recordedAt,
+      input.geofenceStatus
+    );
 
     // Update vehicle live state cache fields
     db.prepare(`
@@ -61,6 +81,9 @@ router.post("/positions", (req, res, next) => {
     next(e);
   }
 });
+
+// All remaining GET/device routes require JWT user auth
+router.use(requireAuth);
 
 /**
  * GET /api/v1/gps/latest
@@ -86,6 +109,9 @@ router.get("/latest", (_req, res, next) => {
         gp.speed,
         gp.heading,
         gp.ignition,
+        gp.altitude_m,
+        gp.battery_pct,
+        gp.source as last_signal_source,
         gp.geofence_status,
         d.name as driver_name,
         d.id as driver_id
@@ -132,6 +158,88 @@ router.get("/positions", (req, res, next) => {
     `).all(vehicleId, maxRows);
 
     res.json({ data: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/v1/gps/devices
+ * List registered GPS/MeshSat telemetry devices
+ */
+router.get("/devices", (_req, res, next) => {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        gd.*,
+        v.vehicle_number,
+        v.registration_number,
+        v.make,
+        v.model
+      FROM gps_devices gd
+      LEFT JOIN vehicles v ON v.id = gd.vehicle_id
+      ORDER BY gd.created_at DESC
+    `).all();
+
+    res.json({ data: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+const registerDeviceSchema = z.object({
+  deviceIdentifier: z.string().min(1),
+  vehicleId: z.string().optional(),
+  status: z.enum(["active", "inactive", "maintenance"]).default("active"),
+});
+
+/**
+ * POST /api/v1/gps/devices
+ * Register or update a GPS device binding (Admin/Fleet Manager)
+ */
+router.post("/devices", requireRole("admin", "fleet_admin", "fleet_manager"), (req, res, next) => {
+  try {
+    const input = registerDeviceSchema.parse(req.body);
+
+    const existing = db.prepare("SELECT * FROM gps_devices WHERE device_identifier = ?").get(input.deviceIdentifier) as any;
+
+    let devId: string;
+    if (existing) {
+      devId = existing.id;
+      db.prepare(`
+        UPDATE gps_devices
+        SET vehicle_id = ?, status = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(input.vehicleId || null, input.status, devId);
+    } else {
+      devId = uuid();
+      db.prepare(`
+        INSERT INTO gps_devices (id, vehicle_id, device_identifier, status)
+        VALUES (?, ?, ?, ?)
+      `).run(devId, input.vehicleId || null, input.deviceIdentifier, input.status);
+    }
+
+    // Update vehicle's gps_device_id reference if vehicleId provided
+    if (input.vehicleId) {
+      db.prepare("UPDATE vehicles SET gps_device_id = ? WHERE id = ?").run(devId, input.vehicleId);
+    }
+
+    writeAudit({
+      userId: req.user!.id,
+      action: existing ? "GPS_DEVICE_UPDATED" : "GPS_DEVICE_REGISTERED",
+      entity: "gps_devices",
+      entityId: devId,
+      newValue: input,
+    });
+
+    const result = db.prepare(`
+      SELECT gd.*, v.vehicle_number, v.registration_number
+      FROM gps_devices gd
+      LEFT JOIN vehicles v ON v.id = gd.vehicle_id
+      WHERE gd.id = ?
+    `).get(devId);
+
+    res.status(existing ? 200 : 201).json({ data: result });
   } catch (e) {
     next(e);
   }

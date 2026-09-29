@@ -11,6 +11,7 @@ describe("Fleet Intelligence & Reconciliation Rules Engine Tests", () => {
   let cardId: string;
   let otherCardId: string;
   let stationId: string;
+  let deviceIdentifier: string;
 
   beforeAll(() => {
     initSchema();
@@ -23,6 +24,7 @@ describe("Fleet Intelligence & Reconciliation Rules Engine Tests", () => {
     driverId = uuid();
     otherDriverId = uuid();
     stationId = uuid();
+    deviceIdentifier = `MESHSAT-NODE-${s}`;
 
     // Create test vehicle (80L capacity, 8.0 km/L)
     db.prepare(`
@@ -38,6 +40,12 @@ describe("Fleet Intelligence & Reconciliation Rules Engine Tests", () => {
         fuel_type, department, status, tank_capacity_litres, expected_km_per_l
       ) VALUES (?, ?, ?, 'Ford', 'Ranger', 2023, 'Utility', 'Diesel', 'Ops', 'active', 80.0, 8.0)
     `).run(otherVehicleId, `TEST-V2-${s}`, `REG-V2-${s}`);
+
+    // Register GPS device
+    db.prepare(`
+      INSERT INTO gps_devices (id, vehicle_id, device_identifier, status)
+      VALUES (?, ?, ?, 'active')
+    `).run(uuid(), vehicleId, deviceIdentifier);
 
     // Create test drivers
     db.prepare(`
@@ -146,6 +154,25 @@ describe("Fleet Intelligence & Reconciliation Rules Engine Tests", () => {
     const violation = result.violations.find((v) => v.rule_code === "RULE_CARD_MISMATCH");
     expect(violation).toBeDefined();
     expect(violation?.severity).toBe("critical");
+  });
+
+  it("resolves deviceIdentifier to vehicle_id and inserts altitude_m, battery_pct, and source", () => {
+    const devRow = db.prepare("SELECT vehicle_id FROM gps_devices WHERE device_identifier = ?").get(deviceIdentifier) as any;
+    expect(devRow).toBeDefined();
+    expect(devRow.vehicle_id).toBe(vehicleId);
+
+    const posId = uuid();
+    db.prepare(`
+      INSERT INTO gps_positions (id, vehicle_id, lat, lon, speed, heading, ignition, odometer, altitude_m, battery_pct, source, recorded_at)
+      VALUES (?, ?, -9.4438, 147.1803, 15, 90, 1, 50400, 45.5, 88.0, 'meshsat', datetime('now'))
+    `).run(posId, devRow.vehicle_id);
+
+    const inserted = db.prepare("SELECT * FROM gps_positions WHERE id = ?").get(posId) as any;
+    expect(inserted).toBeDefined();
+    expect(inserted.vehicle_id).toBe(vehicleId);
+    expect(inserted.altitude_m).toBe(45.5);
+    expect(inserted.battery_pct).toBe(88.0);
+    expect(inserted.source).toBe("meshsat");
   });
 
   it("generates fleet_exception rows in DB upon rule violations", () => {

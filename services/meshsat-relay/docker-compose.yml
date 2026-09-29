@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  meshsat-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshsat-relay
+    ports:
+      - "6055:6055"
+    environment:
+      PORT: 6055
+      FMS_URL: ${FMS_URL:-https://fleet.dspng.tech}
+      FMS_API_KEY: ${FMS_API_KEY:-dev-telemetry-key-12345}
+    restart: unless-stopped

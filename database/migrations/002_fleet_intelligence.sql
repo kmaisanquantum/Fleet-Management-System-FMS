@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS gps_positions (
   heading NUMERIC(6,2) NOT NULL DEFAULT 0,
   ignition BOOLEAN NOT NULL DEFAULT false,
   odometer NUMERIC(12,2) NOT NULL DEFAULT 0,
+  altitude_m NUMERIC(8,2),
+  battery_pct NUMERIC(5,2),
+  source TEXT NOT NULL DEFAULT 'telemetry',
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   geofence_status TEXT NOT NULL DEFAULT 'inside'
 );
