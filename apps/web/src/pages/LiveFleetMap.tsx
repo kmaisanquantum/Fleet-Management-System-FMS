@@ -56,10 +56,14 @@ function createStatusIcon(status: string) {
 }
 
 export default function LiveFleetMap() {
-  const cartoApiKey = import.meta.env.VITE_CARTO_API_KEY;
-  const tileUrl = cartoApiKey
-    ? `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=${cartoApiKey}`
-    : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+  const maptilerKey = import.meta.env.VITE_MAPTILER_KEY;
+  const tileUrl = maptilerKey
+    ? `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${maptilerKey}`
+    : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+  const tileAttribution = maptilerKey
+    ? '&copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
   const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL || "https://meshsat.dspng.space/map";
 
@@ -201,7 +205,7 @@ export default function LiveFleetMap() {
             style={{ height: "100%", width: "100%", background: "#0f172a" }}
           >
             <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+              attribution={tileAttribution}
               url={tileUrl}
               subdomains={["a", "b", "c", "d"]}
             />
