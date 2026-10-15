@@ -150,3 +150,9 @@ To expose MeshSat securely for embedded viewing:
    ```env
    VITE_MESHSAT_MAP_URL=https://mesh.dspng.tech/map
    ```
+
+### Default Map Center & Zoom Configuration
+
+Note: MeshSat's frontend map interface (`/map`) does not accept URL parameters (`lat`, `lon`, `zoom`, `center`) to override the initial map view position. By default, MeshSat serves a map view centered over Europe.
+
+Because the FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`), the default map coordinates and zoom level must be configured directly on the MeshSat gateway instance / VPS UI/settings itself so that embedded iframe views serve Papua New Guinea upon loading.

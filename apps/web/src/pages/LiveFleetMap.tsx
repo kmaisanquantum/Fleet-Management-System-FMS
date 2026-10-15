@@ -200,7 +200,7 @@ export default function LiveFleetMap() {
         ) : (
           <MapContainer
             center={defaultCentre}
-            zoom={12}
+            zoom={11}
             scrollWheelZoom={true}
             style={{ height: "100%", width: "100%", background: "#0f172a" }}
           >
