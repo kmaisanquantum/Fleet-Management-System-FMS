@@ -59,11 +59,11 @@ export default function LiveFleetMap() {
   const maptilerKey = import.meta.env.VITE_MAPTILER_KEY;
   const tileUrl = maptilerKey
     ? `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${maptilerKey}`
-    : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    : "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
 
   const tileAttribution = maptilerKey
     ? '&copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
   const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL || "https://meshsat.dspng.space/map";
 
