@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiGet } from "../api/client";
+import { apiGet, ApiClientError } from "../api/client";
 
 interface DriverProfile {
   id: string;
@@ -39,6 +39,7 @@ export default function DriverIntelligence() {
   const [data, setData] = useState<DriverProfile[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadDriverData();
@@ -46,12 +47,20 @@ export default function DriverIntelligence() {
 
   async function loadDriverData() {
     setLoading(true);
+    setError(null);
     try {
       const res = await apiGet<IntelligenceResponse>("/driver-intelligence");
       setData(res.data);
       setSummary(res.summary);
     } catch (err) {
       console.error("Failed to load driver intelligence:", err);
+      const message =
+        err instanceof ApiClientError
+          ? `${err.message}${err.status === 401 ? " (please sign in again)" : ""}`
+          : "Unable to reach the server. Please try again.";
+      setError(message);
+      setData([]);
+      setSummary(null);
     } finally {
       setLoading(false);
     }
@@ -64,6 +73,24 @@ export default function DriverIntelligence() {
         <h1 className="text-2xl font-bold text-ink-100">Driver Intelligence & Behaviour</h1>
         <p className="text-sm text-ink-400">Driver safety scoring, speeding/harsh braking telemetry logs, and risk rankings</p>
       </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/40 rounded-xl p-4" role="alert">
+          <span className="text-red-400 text-lg leading-none mt-0.5">!</span>
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-red-300">Could not load driver intelligence</div>
+            <div className="text-xs text-red-300/80 mt-1 break-words">{error}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadDriverData()}
+            className="text-xs font-semibold text-red-300 hover:text-red-200 border border-red-500/40 hover:border-red-400 rounded-md px-3 py-1.5 shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Summary Highlights */}
       {summary && (
@@ -89,6 +116,17 @@ export default function DriverIntelligence() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {loading ? (
           <div className="col-span-2 text-center p-8 text-ink-400">Loading driver scorecards…</div>
+        ) : error ? (
+          <div className="col-span-2 text-center p-8 text-ink-400">
+            Driver scorecards are unavailable until the error above is resolved.
+          </div>
+        ) : data.length === 0 ? (
+          <div className="col-span-2 text-center p-10 bg-base-900 border border-dashed border-base-700 rounded-xl">
+            <div className="text-ink-300 font-semibold">No drivers found — add drivers in the Driver Register</div>
+            <div className="text-xs text-ink-500 mt-2">
+              Driver scorecards appear here once driver records exist in the system.
+            </div>
+          </div>
         ) : (
           data.map((driver) => (
             <div key={driver.id} className="bg-base-900 border border-base-700 rounded-xl p-5 space-y-4">

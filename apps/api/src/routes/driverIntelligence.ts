@@ -6,6 +6,35 @@ const router = Router();
 router.use(requireAuth);
 
 /**
+ * Optional analytics tables (e.g. fleet_exceptions, driver_events) may be
+ * absent on databases that were created before the table existed and have not
+ * been re-initialised (run `npm run seed` on dev / re-run initSchema).
+ * Degrade gracefully for a missing table instead of 500-ing the whole
+ * endpoint, while still surfacing genuine query errors.
+ */
+function isMissingTableError(e: unknown): boolean {
+  return e instanceof Error && /no such table/i.test(e.message);
+}
+
+function safeAll<T = any>(sql: string, ...params: any[]): T[] {
+  try {
+    return db.prepare(sql).all(...params) as T[];
+  } catch (e) {
+    if (isMissingTableError(e)) return [];
+    throw e;
+  }
+}
+
+function safeGet<T = any>(sql: string, ...params: any[]): T | undefined {
+  try {
+    return db.prepare(sql).get(...params) as T | undefined;
+  } catch (e) {
+    if (isMissingTableError(e)) return undefined;
+    throw e;
+  }
+}
+
+/**
  * GET /api/v1/driver-intelligence
  * Driver Performance, Safety Scores, and Event Analytics
  */
@@ -33,11 +62,11 @@ router.get("/", (req, res, next) => {
     // Calculate metrics for each driver
     const driverProfiles = drivers.map((driver) => {
       // Driver safety events
-      const events = db.prepare(`
+      const events = safeAll(`
         SELECT * FROM driver_events
         WHERE driver_id = ?
         ORDER BY recorded_at DESC
-      `).all(driver.id) as any[];
+      `, driver.id) as any[];
 
       const speedingCount = events.filter((e) => e.event_type === "speeding").length;
       const harshBrakingCount = events.filter((e) => e.event_type === "harsh_braking").length;
@@ -53,19 +82,19 @@ router.get("/", (req, res, next) => {
       else if (safetyScore < 80) riskRating = "medium";
 
       // Fuel efficiency & fuel logs
-      const fuelStats = db.prepare(`
+      const fuelStats = (safeGet(`
         SELECT
           COUNT(*) as total_refuels,
           COALESCE(AVG(km_per_l), 0) as avg_km_per_l,
           COALESCE(SUM(total_cost), 0) as total_fuel_cost
         FROM vehicle_fuel_logs
         WHERE driver_id = ?
-      `).get(driver.id) as any;
+      `, driver.id) as any) ?? { total_refuels: 0, avg_km_per_l: 0, total_fuel_cost: 0 };
 
       // Linked exceptions
-      const exceptionsCount = (db.prepare(`
+      const exceptionsCount = Number((safeGet(`
         SELECT COUNT(*) as count FROM fleet_exceptions WHERE driver_id = ? AND status IN ('open', 'investigating')
-      `).get(driver.id) as any).count;
+      `, driver.id) as any)?.count ?? 0);
 
       return {
         id: driver.id,
