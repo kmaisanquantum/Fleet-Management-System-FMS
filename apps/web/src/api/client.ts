@@ -49,3 +49,26 @@ export function setToken(token: string | null) {
   if (token) localStorage.setItem("fms_access_token", token);
   else localStorage.removeItem("fms_access_token");
 }
+
+/**
+ * Uploads files to the Driver Portal uploads endpoint (multipart/form-data).
+ * Content-Type is intentionally omitted so the browser sets the boundary.
+ */
+export async function uploadFiles(files: File[]): Promise<{ url: string; fileName: string; mimeType: string; size: number }[]> {
+  const token = getToken();
+  const form = new FormData();
+  for (const file of files) form.append("files", file);
+
+  const res = await fetch(`${BASE_URL}/driver-portal/uploads`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: form,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new ApiClientError(res.status, body.error || "Upload failed");
+  }
+  const json = (await res.json()) as { data: { url: string; fileName: string; mimeType: string; size: number }[] };
+  return json.data;
+}

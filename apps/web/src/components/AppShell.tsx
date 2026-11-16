@@ -35,6 +35,7 @@ const NAV_GROUPS: {
     title: "Administration",
     adminOnly: true,
     items: [
+      { to: "/driver-submissions", label: "Driver Submissions" },
       { to: "/alerts", label: "Alerts" },
       { to: "/audit", label: "Audit Logs" },
       { to: "/users", label: "Users & Roles", adminOnly: true },

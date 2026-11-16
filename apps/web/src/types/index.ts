@@ -289,3 +289,198 @@ export interface DailyMileage {
   date: string;
   totalKm: number;
 }
+
+/* ------------------------------------------------------------------ */
+/* Driver Portal                                                       */
+/* ------------------------------------------------------------------ */
+
+export interface DriverProfile {
+  id: string;
+  employeeNumber: string;
+  name: string;
+  department: string | null;
+  licenceNumber: string;
+  licenceClass: string | null;
+  licenceExpiry: string;
+  authorisationStatus: string;
+  accidentHistory: string | null;
+  training: string | null;
+  email: string | null;
+  fullName: string;
+  accountStatus: string | null;
+}
+
+export interface AssignedVehicleInfo {
+  id: string;
+  vehicle_number: string;
+  registration_number: string;
+  make: string;
+  model: string;
+  vehicle_type: string;
+  fuel_type: string;
+  department: string | null;
+  location: string | null;
+  status: string;
+  current_odometer: number;
+  tank_capacity_litres: number | null;
+  expected_km_per_l: number | null;
+  allocation_id: string;
+  allocation_date: string;
+  return_date: string | null;
+  blockReason?: string | null;
+}
+
+export interface DriverNotification {
+  id: string;
+  user_id: string;
+  driver_id: string | null;
+  title: string;
+  body: string;
+  category: string;
+  related_entity: string | null;
+  related_id: string | null;
+  is_read: number;
+  created_by: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface DriverDashboard {
+  assignedVehicle: AssignedVehicleInfo | null;
+  vehicleBlockReason: string | null;
+  todaysTrips: VehicleTrip[];
+  metrics: {
+    totalKm: number;
+    totalFuelLitres: number;
+    totalFuelCost: number;
+    avgKmPerL: number;
+    pendingInspections: number;
+    safetyScore: number;
+    riskRating: "low" | "medium" | "high";
+    openFaults: number;
+    unreadNotifications: number;
+  };
+  notifications: DriverNotification[];
+}
+
+export interface ChecklistItemDef {
+  key: string;
+  label: string;
+  critical: boolean;
+}
+
+export interface InspectionItem {
+  id: string;
+  inspection_id: string;
+  item_key: string;
+  label: string;
+  status: "satisfactory" | "defective" | "na";
+  is_critical: number;
+  comment: string | null;
+  created_at: string;
+}
+
+export interface DriverInspection extends Omit<VehicleInspection, "checklist"> {
+  driver_id: string | null;
+  photo_urls: string | null;
+  cleared: number;
+  items: InspectionItem[];
+}
+
+export interface VehicleFault {
+  id: string;
+  vehicle_id: string;
+  vehicle_number?: string;
+  driver_id: string | null;
+  driver_name?: string;
+  reported_by_user_id: string | null;
+  category: string;
+  description: string;
+  severity: "minor" | "major" | "critical";
+  odometer: number | null;
+  photo_urls: string | null;
+  status: "open" | "acknowledged" | "in_progress" | "resolved" | "cleared" | "rejected";
+  admin_notes: string | null;
+  maintenance_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IncidentReport {
+  id: string;
+  vehicle_id: string | null;
+  vehicle_number?: string;
+  driver_id: string | null;
+  driver_name?: string;
+  reported_by_user_id: string | null;
+  incident_type: "accident" | "incident" | "near_miss" | "damage" | "theft" | "other";
+  incident_date: string;
+  location: string | null;
+  description: string;
+  injuries: number;
+  injury_details: string | null;
+  damage_description: string | null;
+  third_party_details: string | null;
+  photo_urls: string | null;
+  document_urls: string | null;
+  status: "submitted" | "under_review" | "investigating" | "closed";
+  admin_notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DriverLeaveRequest {
+  id: string;
+  driver_id: string;
+  driver_name?: string;
+  employee_number?: string;
+  user_id: string | null;
+  leave_type: "annual" | "sick" | "compassionate" | "unpaid" | "other";
+  start_date: string;
+  end_date: string;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  admin_notes: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface DriverDocument {
+  id: string;
+  driver_id: string;
+  driver_name?: string;
+  employee_number?: string;
+  user_id: string | null;
+  document_type: string;
+  title: string;
+  file_url: string | null;
+  file_name: string | null;
+  mime_type: string | null;
+  expiry_date: string | null;
+  status: "pending" | "verified" | "rejected" | "expired";
+  admin_notes: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface DriverSafety {
+  safetyScore: number;
+  riskRating: "low" | "medium" | "high";
+  speedingCount: number;
+  harshBrakingCount: number;
+  harshAccelCount: number;
+  idlingCount: number;
+  totalEvents: number;
+  monthlyTrend: { month: string; speeding: number; harshBraking: number; harshAccel: number; idling: number; total: number }[];
+  openExceptions: number;
+  recentEvents: { id: string; event_type: string; recorded_at: string; value: number; lat: number | null; lon: number | null }[];
+}
+
+export interface UploadedFileInfo {
+  url: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}

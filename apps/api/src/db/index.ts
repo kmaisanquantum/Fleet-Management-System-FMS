@@ -37,6 +37,15 @@ export function initSchema() {
   db.exec(schema);
 
   // Check & migrate columns for existing SQLite databases
+  const ensureColumn = (table: string, column: string, definition: string) => {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (cols.length > 0 && !cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+      }
+    } catch (e) {}
+  };
+
   try {
     const gpsCols = db.prepare("PRAGMA table_info(gps_positions)").all() as { name: string }[];
     const colNames = gpsCols.map((c) => c.name);
@@ -51,4 +60,13 @@ export function initSchema() {
       db.exec("ALTER TABLE gps_positions ADD COLUMN source TEXT NOT NULL DEFAULT 'telemetry';");
     }
   } catch (e) {}
+
+  // Driver Portal migrations (columns added to pre-existing tables)
+  ensureColumn("users", "driver_id", "TEXT REFERENCES drivers(id)");
+  ensureColumn("vehicle_inspections", "driver_id", "TEXT REFERENCES drivers(id)");
+  ensureColumn("vehicle_inspections", "photo_urls", "TEXT");
+  ensureColumn("vehicle_inspections", "cleared", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("vehicle_maintenance", "driver_id", "TEXT REFERENCES drivers(id)");
+  ensureColumn("vehicle_maintenance", "requested_by", "TEXT REFERENCES users(id)");
+  ensureColumn("vehicle_fuel_logs", "receipt_url", "TEXT");
 }

@@ -10,6 +10,7 @@ export function ensureBootstrapAccounts() {
   const rolesToEnsure = [
     { name: "admin", desc: "Systems Admin" },
     { name: "fuel_operator", desc: "Fuel Operator" },
+    { name: "driver", desc: "Driver" },
   ];
 
   const roleMap: Record<string, string> = {};

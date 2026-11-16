@@ -13,7 +13,7 @@ router.use(requireRole("admin"));
 
 router.get("/", (_req, res) => {
   const rows = db.prepare(`
-    SELECT u.id, u.email, u.full_name, u.status, u.airport_id, u.role_id, r.name as role_name, u.created_at
+    SELECT u.id, u.email, u.full_name, u.status, u.airport_id, u.role_id, u.driver_id, r.name as role_name, u.created_at
     FROM users u JOIN roles r ON u.role_id = r.id
     WHERE u.status != 'deleted'
     ORDER BY u.full_name
@@ -31,6 +31,7 @@ const schema = z.object({
   fullName: z.string().min(2),
   roleId: z.string(),
   airportId: z.string().optional(),
+  driverId: z.string().optional(),
 });
 
 router.post("/", (req, res, next) => {
@@ -39,8 +40,8 @@ router.post("/", (req, res, next) => {
     const id = uuid();
     const passwordHash = bcrypt.hashSync(input.password, 10);
     db.prepare(`
-      INSERT INTO users (id, email, password_hash, full_name, role_id, airport_id, status, created_by, updated_by)
-      VALUES (@id, @email, @passwordHash, @fullName, @roleId, @airportId, 'active', @createdBy, @createdBy)
+      INSERT INTO users (id, email, password_hash, full_name, role_id, airport_id, driver_id, status, created_by, updated_by)
+      VALUES (@id, @email, @passwordHash, @fullName, @roleId, @airportId, @driverId, 'active', @createdBy, @createdBy)
     `).run({
       id,
       email: input.email,
@@ -48,6 +49,7 @@ router.post("/", (req, res, next) => {
       fullName: input.fullName,
       roleId: input.roleId,
       airportId: input.airportId ?? null,
+      driverId: input.driverId ?? null,
       createdBy: req.user!.id,
     });
     writeAudit({
@@ -55,7 +57,7 @@ router.post("/", (req, res, next) => {
       action: "USER_CREATED",
       entity: "users",
       entityId: id,
-      newValue: { email: input.email, roleId: input.roleId },
+      newValue: { email: input.email, roleId: input.roleId, driverId: input.driverId ?? null },
     });
     res.status(201).json({ data: { id, email: input.email, fullName: input.fullName } });
   } catch (e) {
@@ -71,6 +73,8 @@ const editSchema = z.object({
   role_id: z.string().optional(),
   airportId: z.string().nullable().optional(),
   airport_id: z.string().nullable().optional(),
+  driverId: z.string().nullable().optional(),
+  driver_id: z.string().nullable().optional(),
 });
 
 router.patch("/:id", (req, res, next) => {
@@ -80,9 +84,10 @@ router.patch("/:id", (req, res, next) => {
     const email = input.email;
     const roleId = input.roleId ?? input.role_id;
     const airportId = input.airportId !== undefined ? input.airportId : input.airport_id;
+    const driverId = input.driverId !== undefined ? input.driverId : input.driver_id;
 
     const before = db
-      .prepare(`SELECT id, email, full_name, role_id, airport_id, status FROM users WHERE id = ? AND status != 'deleted'`)
+      .prepare(`SELECT id, email, full_name, role_id, airport_id, driver_id, status FROM users WHERE id = ? AND status != 'deleted'`)
       .get(req.params.id) as any;
 
     if (!before) {
@@ -108,6 +113,10 @@ router.patch("/:id", (req, res, next) => {
       fields.push("airport_id = @airportId");
       params.airportId = airportId;
     }
+    if (driverId !== undefined) {
+      fields.push("driver_id = @driverId");
+      params.driverId = driverId;
+    }
 
     if (fields.length > 0) {
       fields.push("updated_at = datetime('now')");
@@ -123,14 +132,14 @@ router.patch("/:id", (req, res, next) => {
         entity: "users",
         entityId: req.params.id,
         previousValue: before,
-        newValue: { fullName, email, roleId, airportId },
+        newValue: { fullName, email, roleId, airportId, driverId },
       });
     }
 
     const updated = db
       .prepare(
         `
-        SELECT u.id, u.email, u.full_name, u.status, u.airport_id, u.role_id, r.name as role_name, u.created_at
+        SELECT u.id, u.email, u.full_name, u.status, u.airport_id, u.role_id, u.driver_id, r.name as role_name, u.created_at
         FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?
       `
       )

@@ -1,8 +1,9 @@
 # User Roles & Permissions
 
-11 roles, matching the build brief exactly (section 2). Enforced via
-`requireRole()` on each route (see API.md for the per-endpoint role
-requirements) and airport-scoping via `scopeToAirport()`.
+12 roles, matching the build brief (section 2) plus the Driver Portal
+`driver` role. Enforced via `requireRole()` on each route (see API.md for
+the per-endpoint role requirements) and airport-scoping via
+`scopeToAirport()`.
 
 | Role | Scope | Typical permissions |
 |---|---|---|
@@ -17,6 +18,15 @@ requirements) and airport-scoping via `scopeToAirport()`.
 | `safety_regulatory_officer` | Assigned airport | Fuel quality, inspections, incidents, compliance |
 | `auditor` | National, read-only | Transactions and audit trail |
 | `executive` | National, read-only | National dashboards and reports |
+| `driver` | Own records only | Driver Portal: own trips, inspections, fuel, faults, incidents, leave, documents; scoped via `users.driver_id` |
+
+## Driver scoping
+
+The `driver` role is not airport-scoped. A driver login is linked to a
+single `drivers` record through `users.driver_id`. Every Driver Portal
+endpoint resolves the authenticated `req.user.id` → `users.driver_id` and
+filters exclusively on that value, so a driver can never read or write
+another driver's records. Client-supplied driver identifiers are ignored.
 
 ## Airport scoping
 

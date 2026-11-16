@@ -16,6 +16,8 @@ const tables = [
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
   "vehicle_allocations", "drivers", "vehicles", "audit_logs", "alerts",
+  "inspection_items", "vehicle_faults", "incident_reports", "driver_leave_requests",
+  "driver_documents", "driver_notifications",
   "users", "role_permissions", "permissions", "roles"
 ];
 
@@ -55,7 +57,7 @@ function makeUser(email: string, fullName: string, role: string) {
 
 const adminId = makeUser("admin@dspng.tech", "Admin User", "admin");
 makeUser("fleetmgr@dspng.tech", "Fleet Manager", "fleet_manager");
-makeUser("driver1@dspng.tech", "John Driver", "driver");
+const driver1UserId = makeUser("driver1@dspng.tech", "John Driver", "driver");
 
 // --- Business Rules ---
 const BUSINESS_RULES = [
@@ -103,6 +105,25 @@ for (const d of DRIVERS) {
     VALUES (?, ?, ?, ?, ?, ?, ?, 'authorised')
   `).run(d.id, d.empNo, d.name, d.dept, d.licence, d.class, d.expiry);
 }
+
+// Link the driver portal login to a drivers record
+db.prepare("UPDATE users SET driver_id = ? WHERE id = ?").run(DRIVERS[0].id, driver1UserId);
+
+// --- Driver Portal demo data ---
+db.prepare(`
+  INSERT INTO driver_notifications (id, user_id, driver_id, title, body, category, is_read)
+  VALUES (?, ?, ?, 'Welcome to the Driver Portal', 'You can now log trips, complete daily inspections and report faults from your phone.', 'general', 0)
+`).run(uuid(), driver1UserId, DRIVERS[0].id);
+
+db.prepare(`
+  INSERT INTO driver_notifications (id, user_id, driver_id, title, body, category, is_read)
+  VALUES (?, ?, ?, 'Vehicle allocation confirmed', 'You have been assigned a vehicle. Please complete your daily inspection before your first trip.', 'vehicle', 0)
+`).run(uuid(), driver1UserId, DRIVERS[0].id);
+
+db.prepare(`
+  INSERT INTO driver_leave_requests (id, driver_id, user_id, leave_type, start_date, end_date, reason, status)
+  VALUES (?, ?, ?, 'annual', '2026-05-04', '2026-05-08', 'Annual leave', 'pending')
+`).run(uuid(), DRIVERS[0].id, driver1UserId);
 
 // --- Vehicles ---
 const VEHICLES = [

@@ -15,8 +15,8 @@ export default function Login() {
     setError(null);
     setBusy(true);
     try {
-      await login(email, password);
-      navigate("/fleet");
+      const loggedIn = await login(email, password);
+      navigate(loggedIn.role === "driver" ? "/portal" : "/fleet");
     } catch (err: any) {
       setError(err.message || "Login failed");
     } finally {
