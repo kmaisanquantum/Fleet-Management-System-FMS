@@ -14,6 +14,10 @@ services:
       DB_PATH: /app/data/fms.db
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       MAX_ALLOWED_VARIANCE_PCT: ${MAX_ALLOWED_VARIANCE_PCT:-0.5}
+      # Shared secret for machine-to-machine GPS ingest (x-api-key header).
+      # The meshsat-relay forwards telemetry to POST /api/v1/gps/positions with
+      # this key; apiKeyOrAuth() in apps/api/src/middleware/auth.ts validates it.
+      TELEMETRY_API_KEY: ${TELEMETRY_API_KEY:-dev-telemetry-key-12345}
     volumes:
       - api-data:/app/data
     healthcheck:
@@ -30,6 +34,30 @@ services:
     restart: unless-stopped
     ports:
       - "80"
+    depends_on:
+      - api
+      # nginx resolves proxy_pass upstream hostnames at startup, so the relay
+      # must exist before web starts or nginx fails with "host not found".
+      - meshsat-relay
+
+  # MeshSat telemetry webhook relay (services/meshsat-relay). Receives raw
+  # Meshtastic/MeshSat payloads from the MeshSat gateway, normalises them, and
+  # forwards them to the FMS ingest API via POST /api/v1/gps/positions.
+  # Reachable through the web container's nginx at /meshsat-relay/ (preferred —
+  # provides TLS), or directly on host port 6055.
+  meshsat-relay:
+    build:
+      context: ./services/meshsat-relay
+      dockerfile: Dockerfile
+    container_name: nac-meshsat-relay
+    restart: unless-stopped
+    ports:
+      - "6055:6055"
+    environment:
+      PORT: 6055
+      # Internal service DNS — avoids a TLS hairpin through the public hostname.
+      FMS_URL: http://api:4000
+      FMS_API_KEY: ${TELEMETRY_API_KEY:-dev-telemetry-key-12345}
     depends_on:
       - api
 
