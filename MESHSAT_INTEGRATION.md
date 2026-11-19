@@ -135,24 +135,12 @@ Upon sending test packets, verify that the corresponding vehicle moves live on t
 
 ---
 
-## 6. Live Fleet Map Embedded MeshSat View
+## 6. Live Fleet Map MeshSat Integration
 
-The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) includes a view switcher tab ("FMS Telematics Map" / "MeshSat Mesh Map") allowing users to view the live MeshSat node map iframe directly in the FMS dashboard.
+The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) now renders only the native FMS Telematics map (Leaflet), showing vehicles at their live GPS positions. The previous view switcher tab ("FMS Telematics Map" / "MeshSat Mesh Map") and its embedded `VITE_MESHSAT_MAP_URL` iframe have been **removed** — the cross-origin MeshSat map could not be embedded reliably due to browser auth/framing restrictions.
 
-### HTTPS Reverse Proxy Requirement (Mixed Content)
-
-Because `fleet.dspng.tech` is served over **HTTPS**, direct iframe embedding of an HTTP URL (`http://45.76.122.53:6050`) will be blocked by browsers due to mixed-content security rules.
-
-To expose MeshSat securely for embedded viewing:
-1. Setup a reverse proxy on the MeshSat VPS (e.g. Caddy or Nginx) with a TLS certificate for `https://mesh.dspng.tech` pointing to `localhost:6050`.
-2. Ensure MeshSat response headers do not restrict framing (`X-Frame-Options: ALLOW-FROM https://fleet.dspng.tech` or omitting `X-Frame-Options: DENY`, and relaxing `Content-Security-Policy frame-ancestors`).
-3. Set the Vite build environment variable during deployment:
-   ```env
-   VITE_MESHSAT_MAP_URL=https://mesh.dspng.tech/map
-   ```
+MeshSat data still flows into the FMS map: GPS packets posted by the MeshSat gateway to the telemetry relay in `services/meshsat-relay` are ingested and surfaced as live vehicle markers on this page. Embedding the MeshSat `/map` UI directly in the dashboard is no longer required, so the reverse-proxy / iframe-framing setup described in earlier revisions of this document is obsolete.
 
 ### Default Map Center & Zoom Configuration
 
-Note: MeshSat's frontend map interface (`/map`) does not accept URL parameters (`lat`, `lon`, `zoom`, `center`) to override the initial map view position. By default, MeshSat serves a map view centered over Europe.
-
-Because the FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`), the default map coordinates and zoom level must be configured directly on the MeshSat gateway instance / VPS UI/settings itself so that embedded iframe views serve Papua New Guinea upon loading.
+Because the FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`), the Live Fleet Map defaults to those coordinates whenever no vehicle currently has a GPS fix.
