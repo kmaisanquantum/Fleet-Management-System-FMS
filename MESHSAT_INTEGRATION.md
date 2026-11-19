@@ -1,6 +1,6 @@
 # MeshSat Telemetry Integration Guide
 
-This document outlines the architecture, configuration, and deployment procedures for connecting the **MeshSat** gateway (Meshtastic / satellite / cellular node gateway at `http://45.76.122.53:6050`) to the **Fleet Management System (FMS)** at `https://fleet.dspng.tech` for live vehicle tracking on the Live Fleet Map.
+This document outlines the architecture, configuration, and deployment procedures for connecting the **MeshSat** gateway (Meshtastic / satellite / cellular node gateway at `meshsat.dspng.space`) to the **Fleet Management System (FMS)** at `https://fleet.dspng.tech` for live vehicle tracking on the Live Fleet Map.
 
 ---
 
@@ -9,10 +9,11 @@ This document outlines the architecture, configuration, and deployment procedure
 ```
 ┌──────────────────────────────────────┐
 │        MeshSat Gateway Node          │
-│     (http://45.76.122.53:6050)       │
+│        (meshsat.dspng.space)         │
 │  Meshtastic / Satellite / Cellular   │
 └──────────────────┬───────────────────┘
                    │ Webhook HTTP POST
+                   │ (https://fleet.dspng.tech/meshsat-relay/webhook)
                    ▼
 ┌──────────────────────────────────────┐
 │        MeshSat Relay Service         │
@@ -66,28 +67,62 @@ curl -X POST https://fleet.dspng.tech/api/v1/gps/devices \
 
 ## 4. MeshSat Webhook Relay Service Setup
 
-The `services/meshsat-relay` microservice runs alongside the MeshSat node or VPS, receives raw Meshtastic/MeshSat webhook payloads, normalizes fields, and forwards telemetry to FMS.
+The `services/meshsat-relay` microservice receives raw Meshtastic/MeshSat webhook payloads, normalizes fields (node ID / MAC, lat / lon, battery, speed, heading), and forwards telemetry to FMS.
+
+### Compose Service
+
+The relay is declared as a service in the repository root `docker-compose.yml` and runs alongside the API and web containers on the same Docker network:
+
+```yaml
+meshsat-relay:
+  build:
+    context: ./services/meshsat-relay
+    dockerfile: Dockerfile
+  container_name: nac-meshsat-relay
+  restart: unless-stopped
+  ports:
+    - "6055:6055"
+  environment:
+    PORT: 6055
+    FMS_URL: http://api:4000
+    FMS_API_KEY: ${TELEMETRY_API_KEY}
+  depends_on:
+    - api
+```
+
+`FMS_URL` points at the internal `api` service, so the relay talks to FMS over the Docker network rather than the public domain. `FMS_API_KEY` is sourced from the shared `TELEMETRY_API_KEY` environment variable — the same value the `api` service uses to accept the relay's `x-api-key` header (see section 2).
 
 ### Deployment Steps
 
-1. **Configure Environment (`.env`)**:
+1. **Configure Environment (`.env` at the repo root)**:
    ```env
-   PORT=6055
-   FMS_URL=https://fleet.dspng.tech
-   FMS_API_KEY=dev-telemetry-key-12345
+   TELEMETRY_API_KEY=<strong-random-key>   # e.g. openssl rand -hex 32
    ```
+   This single variable is injected into both the `api` and `meshsat-relay` services. The relay's `FMS_API_KEY` and the API's `TELEMETRY_API_KEY` must match.
 
-2. **Run with Docker Compose**:
+2. **Run with Docker Compose (repo root)**:
    ```bash
-   cd services/meshsat-relay
    docker compose up -d --build
    ```
+   This starts `api`, `web`, and `meshsat-relay`. The relay listens on port `6055` and logs its configured target FMS URL on startup.
 
-3. **Configure MeshSat Webhook Target**:
-   In MeshSat settings (`http://45.76.122.53:6050`), set the Webhook URL target to:
+3. **Public Webhook Route (nginx)**:
+   The `web` container's nginx config (`apps/web/infra.nginx.conf`) reverse-proxies the relay under the FMS domain so the MeshSat gateway has a stable HTTPS webhook target:
+   ```nginx
+   location /meshsat-relay/ {
+     proxy_pass http://meshsat-relay:6055/;
+     proxy_set_header Host $host;
+     proxy_set_header X-Real-IP $remote_addr;
+   }
    ```
-   http://localhost:6055/webhook
+   The MeshSat gateway can therefore reach the relay at `https://fleet.dspng.tech/meshsat-relay/webhook` (TLS terminated at the reverse proxy) — preferred over exposing port `6055` directly.
+
+4. **Configure MeshSat Webhook Target**:
+   In MeshSat gateway settings (`meshsat.dspng.space`), set the Webhook URL target to:
    ```
+   https://fleet.dspng.tech/meshsat-relay/webhook
+   ```
+   (For local testing without the reverse proxy, the relay is also reachable directly at `http://localhost:6055/webhook`.)
 
 ---
 
