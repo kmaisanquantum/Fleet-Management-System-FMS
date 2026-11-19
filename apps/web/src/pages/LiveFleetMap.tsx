@@ -72,8 +72,8 @@ function MeshsatFallback({
       </p>
       <p className="text-xs max-w-md text-ink-400">
         {kind === "login"
-          ? "The embedded MeshSat view is showing its login page. Sign in to MeshSat through the proxied path so the session cookie is first-party, then retry — or open it in a new tab."
-          : "The MeshSat map could not be embedded (it may block framing, require a sign-in, or be unreachable). You can still open it in a new tab."}
+          ? "The embedded MeshSat view is showing its login page. Sign in to MeshSat through the proxied path so the session is first-party, then retry — or open it in a new tab."
+          : "MeshSat map is not responding — it may require login or be unreachable. You can open it in a new tab."}
       </p>
       <div className="flex items-center gap-3 pt-1">
         <a
@@ -102,8 +102,10 @@ export default function LiveFleetMap() {
     ? '&copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     : 'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, &copy; OpenStreetMap contributors';
 
-  // Same-domain reverse-proxied path (see apps/web/infra.nginx.conf).
-  const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL || "https://fleet.dspng.tech/meshsat/map";
+  // Same-origin reverse-proxied path (see apps/web/infra.nginx.conf). A relative
+  // URL resolves against the current FMS origin so the MeshSat login state stays
+  // first-party and is carried inside the iframe.
+  const meshsatMapUrl = import.meta.env.VITE_MESHSAT_MAP_URL || "/meshsat/map";
 
   const [activeTab, setActiveTab] = useState<"fms" | "meshsat">("fms");
   const [vehicles, setVehicles] = useState<VehicleGpsData[]>([]);
@@ -126,9 +128,10 @@ export default function LiveFleetMap() {
     if (activeTab !== "meshsat") return;
     setMeshsatStatus("loading");
     meshsatTimerRef.current = window.setTimeout(() => {
-      // If onLoad never fired the frame is likely blocked or unreachable.
+      // If onLoad never fired, the frame is likely blocked, unreachable, or
+      // stuck on an auth challenge.
       setMeshsatStatus((s) => (s === "loading" ? "error" : s));
-    }, 12000);
+    }, 10000);
     return () => {
       if (meshsatTimerRef.current) window.clearTimeout(meshsatTimerRef.current);
     };
@@ -137,6 +140,7 @@ export default function LiveFleetMap() {
   function handleMeshsatLoad() {
     if (meshsatTimerRef.current) window.clearTimeout(meshsatTimerRef.current);
     let looksLikeLogin = false;
+    let looksEmpty = false;
     try {
       // The proxied frame is same-origin, so its DOM is inspectable. A direct
       // cross-site frame throws here (and would silently drop cookies anyway).
@@ -146,11 +150,14 @@ export default function LiveFleetMap() {
         const hasPasswordField = !!doc.querySelector('input[type="password"]');
         const hasLoginForm = !!doc.querySelector('form[action*="login" i], form[action*="signin" i]');
         looksLikeLogin = hasPasswordField || hasLoginForm || /\b(sign in|log ?in|password)\b/.test(text);
+        // A completely empty document usually means an auth challenge (e.g. a
+        // 401 with no body) or a frame the browser refused to render.
+        looksEmpty = text.trim().length === 0 && doc.body.children.length === 0;
       }
     } catch {
       looksLikeLogin = false;
     }
-    setMeshsatStatus(looksLikeLogin ? "login" : "ready");
+    setMeshsatStatus(looksLikeLogin ? "login" : looksEmpty ? "error" : "ready");
   }
 
   function retryMeshsat() {
@@ -253,34 +260,49 @@ export default function LiveFleetMap() {
       <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[600px] relative">
         {activeTab === "meshsat" ? (
           meshsatMapUrl ? (
-            meshsatStatus === "login" || meshsatStatus === "error" ? (
-              <MeshsatFallback kind={meshsatStatus} url={meshsatMapUrl} onRetry={retryMeshsat} />
-            ) : (
-              <div className="relative w-full h-full">
-                {meshsatStatus === "loading" && (
-                  <div className="absolute inset-0 z-10 flex items-center justify-center text-ink-400 bg-base-900">
-                    Loading MeshSat map…
-                  </div>
-                )}
-                <iframe
-                  ref={meshsatIframeRef}
-                  src={meshsatMapUrl}
-                  className="w-full h-full border-0"
-                  title="MeshSat Map"
-                  allow="geolocation"
-                  onLoad={handleMeshsatLoad}
-                />
+            <div className="h-full flex flex-col">
+              <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-base-700 bg-base-900">
+                <span className="text-xs text-ink-400">MeshSat Mesh Map</span>
+                <a
+                  href={meshsatMapUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-amber-400 hover:text-amber-300"
+                >
+                  Open MeshSat in new tab ↗
+                </a>
               </div>
-            )
+              <div className="relative flex-1">
+                {meshsatStatus === "login" || meshsatStatus === "error" ? (
+                  <MeshsatFallback kind={meshsatStatus} url={meshsatMapUrl} onRetry={retryMeshsat} />
+                ) : (
+                  <>
+                    {meshsatStatus === "loading" && (
+                      <div className="absolute inset-0 z-10 flex items-center justify-center text-ink-400 bg-base-900">
+                        Loading MeshSat map…
+                      </div>
+                    )}
+                    <iframe
+                      ref={meshsatIframeRef}
+                      src={meshsatMapUrl}
+                      className="w-full h-full border-0"
+                      title="MeshSat Map"
+                      allow="geolocation"
+                      onLoad={handleMeshsatLoad}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
           ) : (
             <div className="h-full flex flex-col items-center justify-center text-ink-400 space-y-3 p-6 text-center">
               <div className="text-4xl">📡</div>
               <p className="text-base font-semibold text-ink-200">MeshSat Map Endpoint Unconfigured</p>
               <p className="text-xs max-w-md text-ink-400">
-                To view the embedded MeshSat mesh network map, set <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">VITE_MESHSAT_MAP_URL</code> (e.g. <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">https://fleet.dspng.tech/meshsat/map</code>) in the environment during web build.
+                To view the embedded MeshSat mesh network map, set <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">VITE_MESHSAT_MAP_URL</code> (e.g. <code className="bg-base-800 text-amber-400 px-1.5 py-0.5 rounded">/meshsat/map</code>) in the environment during web build.
               </p>
               <p className="text-xs text-ink-500 max-w-md">
-                The URL must be the same-domain reverse-proxied path (see infra.nginx.conf) so the MeshSat session cookie is first-party, and HTTPS to avoid mixed-content iframe blocking.
+                The URL must be the same-origin reverse-proxied path (see infra.nginx.conf) so the MeshSat login state is first-party instead of being blocked as a third-party cookie.
               </p>
             </div>
           )
