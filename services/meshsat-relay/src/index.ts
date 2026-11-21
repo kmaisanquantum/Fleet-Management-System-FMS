@@ -29,10 +29,7 @@ app.get("/", (_req: Request, res: Response) => {
   });
 });
 
-/**
- * Normalizes incoming MeshSat/Meshtastic webhook payloads into standard FMS GPS format.
- */
-function normalizeMeshSatPayload(body: any): {
+interface NormalizedTelemetry {
   deviceIdentifier: string;
   lat: number;
   lon: number;
@@ -40,39 +37,105 @@ function normalizeMeshSatPayload(body: any): {
   battery?: number;
   speed?: number;
   heading?: number;
+  satellites?: number;
+  ignition?: number;
+  odometer?: number;
+  fuelLevelPct?: number;
+  gsmSignal?: number;
   recordedAt?: string;
-} | null {
+}
+
+/** Returns the first candidate that parses to a finite number (also accepts numeric strings and booleans). */
+function toNumber(...values: any[]): number | undefined {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value === "boolean") return value ? 1 : 0;
+    const n = typeof value === "number" ? value : parseFloat(value);
+    if (!isNaN(n)) return n;
+  }
+  return undefined;
+}
+
+/** Selects the most recent record from a Teltonika array payload, else returns the root object. */
+function pickLatestRecord(body: any): any {
+  if (Array.isArray(body)) return body[body.length - 1];
+  if (Array.isArray(body.data)) return body.data[body.data.length - 1];
+  if (Array.isArray(body.records)) return body.records[body.records.length - 1];
+  return body;
+}
+
+/**
+ * Normalizes incoming webhook payloads into the standard FMS GPS position format.
+ * Supports Meshtastic/MeshSat payloads (fromId/sender/nodeId/mac) and Teltonika
+ * FMB125 payloads (imei/device_id with a nested `gps` object and AVL `io` elements).
+ */
+function normalizeMeshSatPayload(body: any): NormalizedTelemetry | null {
   if (!body || typeof body !== "object") return null;
 
-  // Handle nested Meshtastic payload structure
-  const payload = body.payload || body.data || body;
+  // Teltonika may send a bare array of records or nest them under `data`/`records`.
+  const record = pickLatestRecord(body);
+  if (!record || typeof record !== "object") return null;
+
+  // Handle nested Meshtastic payload structure.
+  const payload = record.payload || record.data || record;
 
   const deviceIdentifier =
+    body.imei ||
+    body.IMEI ||
+    body.device_id ||
+    body.deviceId ||
     body.fromId ||
     body.sender ||
     body.nodeId ||
     body.node_id ||
     body.mac ||
     body.deviceIdentifier ||
+    body.device?.imei ||
+    body.device?.IMEI ||
+    record.imei ||
+    record.IMEI ||
+    record.device_id ||
+    record.deviceId ||
+    record.fromId ||
+    record.sender ||
+    record.nodeId ||
+    record.node_id ||
+    record.mac ||
+    record.deviceIdentifier ||
+    payload.imei ||
+    payload.IMEI ||
+    payload.device_id ||
+    payload.deviceId ||
     payload.fromId ||
     payload.sender ||
     payload.nodeId ||
     payload.mac ||
-    payload.deviceIdentifier;
+    payload.deviceIdentifier ||
+    payload.device?.imei;
 
-  const lat = parseFloat(payload.latitude ?? payload.lat ?? body.latitude ?? body.lat);
-  const lon = parseFloat(payload.longitude ?? payload.lon ?? payload.lng ?? body.longitude ?? body.lon ?? body.lng);
+  // Teltonika nests GNSS fields under `gps`.
+  const gps = record.gps || payload.gps || {};
+  // Teltonika AVL IO elements: a nested `io` object or flat `io_####` keys.
+  const io = record.io || payload.io || {};
 
-  if (!deviceIdentifier || isNaN(lat) || isNaN(lon)) {
+  const lat = toNumber(gps.latitude, gps.lat, payload.latitude, payload.lat, body.latitude, body.lat);
+  const lon = toNumber(gps.longitude, gps.lon, gps.lng, payload.longitude, payload.lon, payload.lng, body.longitude, body.lon, body.lng);
+
+  if (!deviceIdentifier || lat === undefined || lon === undefined) {
     return null;
   }
 
-  const altitude = parseFloat(payload.altitude ?? payload.alt ?? body.altitude ?? body.alt);
-  const battery = parseFloat(payload.batteryLevel ?? payload.battery ?? payload.batt ?? body.batteryLevel ?? body.battery);
-  const speed = parseFloat(payload.speed ?? body.speed ?? 0);
-  const heading = parseFloat(payload.heading ?? payload.track ?? body.heading ?? 0);
+  const altitude = toNumber(gps.altitude, payload.altitude, payload.alt, body.altitude, body.alt);
+  const battery = toNumber(payload.batteryLevel, payload.battery, payload.batt, io.batteryVoltage, body.batteryLevel, body.battery);
+  const speed = toNumber(gps.speed, payload.speed, body.speed) ?? 0;
+  const heading = toNumber(gps.angle, gps.heading, payload.heading, payload.track, body.heading) ?? 0;
+  const satellites = toNumber(gps.satellites, gps.sat, payload.satellites, body.satellites);
+  const ignition = toNumber(io.ignition, io.ignitionStatus, record.ignition, record.io_239, payload.io_239, io["239"], record["239"]);
+  const odometer = toNumber(io.totalOdometer, io.odometer, record.odometer, record.io_16, payload.io_16, io["16"]);
+  const fuelLevelPct = toNumber(io.fuelLevelPct, io.fuelLevel, io.fuel_level, record.fuelLevel, record.io_30, record.io_81, io["30"], io["81"]);
+  const gsmSignal = toNumber(io.gsmSignal, io.gsm_signal, io.gsm, record.gsmSignal, record.io_21, io["21"]);
 
-  const rawTime = payload.time || payload.timestamp || body.time || body.timestamp;
+  const rawTime = record.ts || record.timestamp || record.time || payload.time || payload.timestamp || body.time || body.timestamp;
   let recordedAt: string | undefined;
   if (rawTime) {
     try {
@@ -87,10 +150,15 @@ function normalizeMeshSatPayload(body: any): {
     deviceIdentifier: String(deviceIdentifier),
     lat,
     lon,
-    altitude: isNaN(altitude) ? undefined : altitude,
-    battery: isNaN(battery) ? undefined : battery,
-    speed: isNaN(speed) ? 0 : speed,
-    heading: isNaN(heading) ? 0 : heading,
+    altitude,
+    battery,
+    speed,
+    heading,
+    satellites,
+    ignition,
+    odometer,
+    fuelLevelPct,
+    gsmSignal,
     recordedAt,
   };
 }
@@ -107,7 +175,7 @@ app.post(["/webhook", "/webhook/meshsat", "/api/v1/telemetry"], async (req: Requ
       console.warn("Received invalid/unparseable MeshSat payload:", JSON.stringify(req.body));
       return res.status(400).json({
         error: "Invalid MeshSat payload format",
-        requiredFields: ["nodeId/fromId/mac", "latitude", "longitude"],
+        requiredFields: ["nodeId/fromId/mac/imei", "latitude", "longitude"],
         received: req.body,
       });
     }
@@ -129,7 +197,12 @@ app.post(["/webhook", "/webhook/meshsat", "/api/v1/telemetry"], async (req: Requ
         battery: normalized.battery,
         speed: normalized.speed,
         heading: normalized.heading,
-        ignition: normalized.speed && normalized.speed > 0 ? 1 : 0,
+        satellites: normalized.satellites,
+        // Prefer the Teltonika ignition IO element; fall back to deriving it from speed.
+        ignition: normalized.ignition ?? (normalized.speed && normalized.speed > 0 ? 1 : 0),
+        odometer: normalized.odometer,
+        fuelLevelPct: normalized.fuelLevelPct,
+        gsmSignal: normalized.gsmSignal,
         source: "meshsat",
         recordedAt: normalized.recordedAt,
       }),
