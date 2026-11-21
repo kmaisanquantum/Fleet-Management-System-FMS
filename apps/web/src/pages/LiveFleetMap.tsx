@@ -32,6 +32,40 @@ interface VehicleGpsData {
   ignition: number;
   geofence_status: string;
   driver_name: string | null;
+  device_type?: "meshsat" | "teltonika" | string | null;
+  last_signal_source?: string | null;
+  gsm_signal?: number | null;
+  battery_pct?: number | null;
+  external_voltage_mv?: number | null;
+  geofence_zone_id?: string | null;
+  trip_odometer?: number | null;
+  fuel_level_pct?: number | null;
+  current_fuel_level_pct?: number | null;
+  engine_rpm?: number | null;
+  engine_hours?: number | null;
+  harsh_event?: string | null;
+  driver_id_tag?: string | null;
+}
+
+const HARSH_EVENT_LABELS: Record<string, string> = {
+  harsh_acceleration: "Harsh acceleration",
+  harsh_braking: "Harsh braking",
+  harsh_cornering: "Harsh cornering",
+  crash: "Crash detected",
+};
+
+function SourceBadge({ source }: { source?: string | null }) {
+  if (!source) return null;
+  const isTeltonika = source.toLowerCase() === "teltonika";
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+        isTeltonika ? "bg-emerald-100 text-emerald-800" : "bg-sky-100 text-sky-800"
+      }`}
+    >
+      {isTeltonika ? "Teltonika" : "MeshSat"}
+    </span>
+  );
 }
 
 function createStatusIcon(status: string) {
@@ -168,9 +202,12 @@ export default function LiveFleetMap() {
                 >
                   <Popup>
                     <div className="p-1 space-y-2 text-ink-900 min-w-[220px]">
-                      <div className="flex items-center justify-between border-b pb-1">
+                      <div className="flex items-center justify-between border-b pb-1 gap-2">
                         <span className="font-bold text-sm">{v.vehicle_number}</span>
-                        <span className="text-xs text-gray-600 font-mono">{v.registration_number}</span>
+                        <div className="flex items-center gap-1">
+                          <SourceBadge source={v.device_type || v.last_signal_source} />
+                          <span className="text-xs text-gray-600 font-mono">{v.registration_number}</span>
+                        </div>
                       </div>
                       <div className="text-xs space-y-1">
                         <div><strong className="text-gray-700">Model:</strong> {v.make} {v.model}</div>
@@ -179,7 +216,40 @@ export default function LiveFleetMap() {
                         <div><strong className="text-gray-700">Speed:</strong> {v.speed || 0} km/h | Heading: {v.heading || 0}&deg;</div>
                         <div><strong className="text-gray-700">Ignition:</strong> {v.ignition === 1 ? "ON" : "OFF"}</div>
                         <div><strong className="text-gray-700">Odometer:</strong> {v.current_odometer?.toLocaleString() || 0} km</div>
-                        <div><strong className="text-gray-700">Geofence:</strong> {v.geofence_status || "inside"}</div>
+                        {v.trip_odometer != null && (
+                          <div><strong className="text-gray-700">Trip odometer:</strong> {v.trip_odometer.toLocaleString()} km</div>
+                        )}
+                        <div>
+                          <strong className="text-gray-700">Geofence:</strong> {v.geofence_status || "inside"}
+                          {v.geofence_zone_id ? ` (zone ${v.geofence_zone_id})` : ""}
+                        </div>
+                        {v.gsm_signal != null && (
+                          <div><strong className="text-gray-700">GSM signal:</strong> {v.gsm_signal}</div>
+                        )}
+                        {v.battery_pct != null && (
+                          <div><strong className="text-gray-700">Battery:</strong> {v.battery_pct}%</div>
+                        )}
+                        {v.external_voltage_mv != null && (
+                          <div><strong className="text-gray-700">External voltage:</strong> {(v.external_voltage_mv / 1000).toFixed(2)} V</div>
+                        )}
+                        {(v.fuel_level_pct != null || v.current_fuel_level_pct != null) && (
+                          <div><strong className="text-gray-700">Fuel level:</strong> {v.fuel_level_pct ?? v.current_fuel_level_pct}%</div>
+                        )}
+                        {v.engine_rpm != null && (
+                          <div><strong className="text-gray-700">Engine RPM:</strong> {v.engine_rpm}</div>
+                        )}
+                        {v.engine_hours != null && (
+                          <div><strong className="text-gray-700">Engine hours:</strong> {v.engine_hours}</div>
+                        )}
+                        {v.driver_id_tag && (
+                          <div><strong className="text-gray-700">Driver ID tag:</strong> {v.driver_id_tag}</div>
+                        )}
+                        {v.harsh_event && (
+                          <div className="flex items-center gap-1 text-red-700 font-semibold">
+                            <span>&#9888;</span>
+                            <span>{HARSH_EVENT_LABELS[v.harsh_event] || v.harsh_event}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="pt-2 border-t text-right">
                         <Link

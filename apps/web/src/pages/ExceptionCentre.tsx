@@ -107,7 +107,7 @@ export default function ExceptionCentre() {
     }
   }
 
-  const CATEGORIES = ["all", "fuel", "gps", "security", "driver", "vehicle", "maintenance", "compliance"];
+  const CATEGORIES = ["all", "fuel", "gps", "geofence", "security", "driver", "vehicle", "maintenance", "compliance"];
 
   return (
     <div className="space-y-6">

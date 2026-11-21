@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
   current_longitude REAL,
   current_location_name TEXT,
   last_gps_fix_at TEXT,
+  current_fuel_level_pct REAL,
+  current_engine_hours REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -144,6 +146,7 @@ CREATE TABLE IF NOT EXISTS gps_devices (
   id TEXT PRIMARY KEY,
   vehicle_id TEXT REFERENCES vehicles(id),
   device_identifier TEXT UNIQUE NOT NULL,
+  device_type TEXT NOT NULL DEFAULT 'meshsat' CHECK(device_type IN ('meshsat', 'teltonika')),
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'maintenance')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -162,7 +165,19 @@ CREATE TABLE IF NOT EXISTS gps_positions (
   battery_pct REAL,
   source TEXT NOT NULL DEFAULT 'telemetry',
   recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-  geofence_status TEXT NOT NULL DEFAULT 'inside'
+  geofence_status TEXT NOT NULL DEFAULT 'inside',
+  ignition_source TEXT,
+  movement_source TEXT,
+  gsm_signal INTEGER,
+  external_voltage_mv INTEGER,
+  geofence_zone_id TEXT,
+  trip_odometer REAL,
+  fuel_level_pct REAL,
+  engine_rpm INTEGER,
+  engine_hours REAL,
+  harsh_event TEXT,
+  driver_id_tag TEXT,
+  io_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS fuel_cards (
@@ -199,7 +214,7 @@ CREATE TABLE IF NOT EXISTS geofences (
 
 CREATE TABLE IF NOT EXISTS driver_events (
   id TEXT PRIMARY KEY,
-  event_type TEXT NOT NULL CHECK(event_type IN ('speeding', 'harsh_braking', 'harsh_accel', 'excessive_idling')),
+  event_type TEXT NOT NULL CHECK(event_type IN ('speeding', 'harsh_braking', 'harsh_accel', 'excessive_idling', 'harsh_cornering', 'crash')),
   vehicle_id TEXT REFERENCES vehicles(id),
   driver_id TEXT REFERENCES drivers(id),
   recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -236,7 +251,7 @@ CREATE TABLE IF NOT EXISTS vehicle_fuel_logs (
 CREATE TABLE IF NOT EXISTS fleet_exceptions (
   id TEXT PRIMARY KEY,
   severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
-  category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance')),
+  category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence')),
   rule_code TEXT NOT NULL,
   vehicle_id TEXT REFERENCES vehicles(id),
   driver_id TEXT REFERENCES drivers(id),

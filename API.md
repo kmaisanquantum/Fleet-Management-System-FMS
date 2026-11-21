@@ -22,11 +22,11 @@ require `Authorization: Bearer <accessToken>`. For telemetry ingestion (`POST /g
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/positions` | Ingest vehicle GPS telemetry `{ vehicleId, deviceIdentifier, lat, lon, speed, heading, ignition, odometer, altitude, battery, source, recordedAt }`. Supports JWT Bearer OR `x-api-key` header. |
-| GET | `/latest` | Get latest GPS positions, speed, ignition, altitude, battery, and status for active vehicles |
+| POST | `/positions` | Ingest vehicle GPS telemetry `{ vehicleId, deviceIdentifier, lat, lon, speed, heading, ignition, odometer, altitude, battery, source, recordedAt }`. Optional Teltonika FMB125 fields: `ignitionSource`, `movementSource`, `gsmSignal`, `externalVoltage`, `geofenceZoneId`, `tripOdometer`, `fuelLevelPct`, `engineRpm`, `engineHours`, `harshEvent` (`harsh_acceleration` \| `harsh_braking` \| `harsh_cornering` \| `crash`), `driverIdTag`, `io` (raw IO element map). Supports JWT Bearer OR `x-api-key` header. |
+| GET | `/latest` | Get latest GPS positions, speed, ignition, altitude, battery, and status for active vehicles (incl. Teltonika GSM signal, fuel level, engine RPM/hours, harsh event, device type) |
 | GET | `/positions?vehicleId=` | Get breadcrumb GPS position history for a vehicle |
-| GET | `/devices` | List registered GPS/MeshSat telemetry devices and vehicle bindings |
-| POST | `/devices` | Register or update a GPS device binding (`deviceIdentifier`, `vehicleId`, `status`). Admin/Fleet Manager. |
+| GET | `/devices` | List registered GPS telemetry devices and vehicle bindings, filterable by `?deviceType=meshsat\|teltonika` |
+| POST | `/devices` | Register or update a GPS device binding (`deviceIdentifier`, `vehicleId`, `status`, `deviceType` = `meshsat` \| `teltonika`, default `meshsat`). Admin/Fleet Manager. |
 
 ## Fuel Transactions — `/api/v1/fuel-transactions`
 

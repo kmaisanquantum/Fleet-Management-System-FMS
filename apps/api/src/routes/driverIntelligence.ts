@@ -43,9 +43,17 @@ router.get("/", (req, res, next) => {
       const harshBrakingCount = events.filter((e) => e.event_type === "harsh_braking").length;
       const harshAccelCount = events.filter((e) => e.event_type === "harsh_accel").length;
       const idlingCount = events.filter((e) => e.event_type === "excessive_idling").length;
+      const harshCorneringCount = events.filter((e) => e.event_type === "harsh_cornering").length;
+      const crashCount = events.filter((e) => e.event_type === "crash").length;
 
       // Deduct points from 100 base score
-      const safetyPenalty = speedingCount * 10 + harshBrakingCount * 5 + harshAccelCount * 5 + idlingCount * 3;
+      const safetyPenalty =
+        speedingCount * 10 +
+        harshBrakingCount * 5 +
+        harshAccelCount * 5 +
+        idlingCount * 3 +
+        harshCorneringCount * 5 +
+        crashCount * 15;
       const safetyScore = Math.max(0, 100 - safetyPenalty);
 
       let riskRating: "low" | "medium" | "high" = "low";
@@ -84,6 +92,8 @@ router.get("/", (req, res, next) => {
           harshBrakingCount,
           harshAccelCount,
           idlingCount,
+          harshCorneringCount,
+          crashCount,
           avgKmL: Number(fuelStats.avg_km_per_l.toFixed(1)),
           totalFuelCost: Number(fuelStats.total_fuel_cost.toFixed(2)),
           openExceptionsCount: exceptionsCount,

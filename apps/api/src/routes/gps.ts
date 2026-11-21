@@ -22,7 +22,45 @@ const gpsPositionSchema = z.object({
   source: z.string().default("telemetry"),
   recordedAt: z.string().optional(),
   geofenceStatus: z.string().default("inside"),
+  // Teltonika AVL specific telemetry
+  ignitionSource: z.string().optional(),
+  movementSource: z.string().optional(),
+  gsmSignal: z.number().int().optional(),
+  externalVoltage: z.number().int().optional(),
+  geofenceZoneId: z.string().optional(),
+  tripOdometer: z.number().optional(),
+  fuelLevelPct: z.number().optional(),
+  engineRpm: z.number().int().optional(),
+  engineHours: z.number().optional(),
+  harshEvent: z.enum(["harsh_acceleration", "harsh_braking", "harsh_cornering", "crash"]).optional(),
+  driverIdTag: z.string().optional(),
+  io: z.record(z.number()).optional(),
 });
+
+/** Teltonika harsh-driving events mapped to driver_events safety-score categories. */
+const HARSH_EVENT_TYPE: Record<string, string> = {
+  harsh_acceleration: "harsh_accel",
+  harsh_braking: "harsh_braking",
+  harsh_cornering: "harsh_cornering",
+  crash: "crash",
+};
+
+/** The IO element id that carries each harsh event, used to source the event magnitude. */
+const HARSH_EVENT_IO: Record<string, number> = {
+  harsh_acceleration: 248,
+  harsh_braking: 249,
+  harsh_cornering: 250,
+  crash: 247,
+};
+
+const GEOFENCE_EXIT_STATES = ["exit", "exited", "outside", "out"];
+
+function activeDriverId(vehicleId: string): string | null {
+  const allocation = db
+    .prepare("SELECT driver_id FROM vehicle_allocations WHERE vehicle_id = ? AND authorisation_status = 'active' LIMIT 1")
+    .get(vehicleId) as { driver_id: string } | undefined;
+  return allocation?.driver_id ?? null;
+}
 
 /**
  * POST /api/v1/gps/positions
@@ -50,8 +88,13 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
     const posId = uuid();
 
     db.prepare(`
-      INSERT INTO gps_positions (id, vehicle_id, lat, lon, speed, heading, ignition, odometer, altitude_m, battery_pct, source, recorded_at, geofence_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO gps_positions (
+        id, vehicle_id, lat, lon, speed, heading, ignition, odometer, altitude_m, battery_pct,
+        source, recorded_at, geofence_status, ignition_source, movement_source, gsm_signal,
+        external_voltage_mv, geofence_zone_id, trip_odometer, fuel_level_pct, engine_rpm,
+        engine_hours, harsh_event, driver_id_tag, io_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       posId,
       vehicleId,
@@ -65,7 +108,19 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
       input.battery ?? null,
       input.source,
       recordedAt,
-      input.geofenceStatus
+      input.geofenceStatus,
+      input.ignitionSource ?? null,
+      input.movementSource ?? null,
+      input.gsmSignal ?? null,
+      input.externalVoltage ?? null,
+      input.geofenceZoneId ?? null,
+      input.tripOdometer ?? null,
+      input.fuelLevelPct ?? null,
+      input.engineRpm ?? null,
+      input.engineHours ?? null,
+      input.harshEvent ?? null,
+      input.driverIdTag ?? null,
+      input.io ? JSON.stringify(input.io) : null
     );
 
     // Update vehicle live state cache fields
@@ -74,6 +129,53 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
       SET current_latitude = ?, current_longitude = ?, current_odometer = MAX(current_odometer, ?), last_gps_fix_at = ?
       WHERE id = ?
     `).run(input.lat, input.lon, input.odometer, recordedAt, vehicleId);
+
+    // Live-state caches for fuel level (reconciliation) and engine hours (maintenance)
+    if (input.fuelLevelPct !== undefined) {
+      db.prepare("UPDATE vehicles SET current_fuel_level_pct = ?, updated_at = datetime('now') WHERE id = ?").run(input.fuelLevelPct, vehicleId);
+    }
+    if (input.engineHours !== undefined) {
+      db.prepare("UPDATE vehicles SET current_engine_hours = ?, updated_at = datetime('now') WHERE id = ?").run(input.engineHours, vehicleId);
+    }
+
+    const driverId = activeDriverId(vehicleId);
+
+    // Harsh-driving telemetry feeds driver-intelligence safety scoring
+    if (input.harshEvent) {
+      const eventType = HARSH_EVENT_TYPE[input.harshEvent];
+      const eventIo = HARSH_EVENT_IO[input.harshEvent];
+      const magnitude = (eventIo !== undefined ? input.io?.[String(eventIo)] : undefined) ?? input.speed ?? 0;
+      db.prepare(`
+        INSERT INTO driver_events (id, event_type, vehicle_id, driver_id, recorded_at, value, lat, lon)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(uuid(), eventType, vehicleId, driverId, recordedAt, magnitude, input.lat, input.lon);
+    }
+
+    // Geofence exit creates a fleet exception via the standard mechanism
+    if (GEOFENCE_EXIT_STATES.includes((input.geofenceStatus || "").toLowerCase())) {
+      const excId = uuid();
+      db.prepare(`
+        INSERT INTO fleet_exceptions (
+          id, severity, category, rule_code, vehicle_id, driver_id, gps_position_id, description, status, created_at
+        ) VALUES (?, 'warning', 'geofence', 'RULE_GEOFENCE_EXIT', ?, ?, ?, ?, 'open', datetime('now'))
+      `).run(
+        excId,
+        vehicleId,
+        driverId,
+        posId,
+        `Vehicle exited geofence${input.geofenceZoneId ? ` zone ${input.geofenceZoneId}` : ""} at ${recordedAt}.`
+      );
+
+      db.prepare(`
+        INSERT INTO audit_logs (id, action, entity, entity_id, new_value, reason, created_at)
+        VALUES (?, 'EXCEPTION_CREATED', 'fleet_exceptions', ?, ?, ?, datetime('now'))
+      `).run(
+        uuid(),
+        excId,
+        JSON.stringify({ rule_code: "RULE_GEOFENCE_EXIT", vehicle_id: vehicleId }),
+        "Fleet Exception triggered: RULE_GEOFENCE_EXIT"
+      );
+    }
 
     const inserted = db.prepare("SELECT * FROM gps_positions WHERE id = ?").get(posId);
     res.status(201).json({ data: inserted, message: "GPS position recorded" });
@@ -104,6 +206,8 @@ router.get("/latest", (_req, res, next) => {
         v.current_odometer,
         v.current_latitude,
         v.current_longitude,
+        v.current_fuel_level_pct,
+        v.current_engine_hours,
         v.last_gps_fix_at,
         vsv.computed_status,
         gp.speed,
@@ -113,6 +217,17 @@ router.get("/latest", (_req, res, next) => {
         gp.battery_pct,
         gp.source as last_signal_source,
         gp.geofence_status,
+        gp.gsm_signal,
+        gp.external_voltage_mv,
+        gp.geofence_zone_id,
+        gp.trip_odometer,
+        gp.fuel_level_pct,
+        gp.engine_rpm,
+        gp.engine_hours,
+        gp.harsh_event,
+        gp.driver_id_tag,
+        gp.io_json,
+        (SELECT device_type FROM gps_devices WHERE vehicle_id = v.id LIMIT 1) as device_type,
         d.name as driver_name,
         d.id as driver_id
       FROM vehicles v
@@ -165,11 +280,12 @@ router.get("/positions", (req, res, next) => {
 
 /**
  * GET /api/v1/gps/devices
- * List registered GPS/MeshSat telemetry devices
+ * List registered GPS telemetry devices (MeshSat / Teltonika)
  */
-router.get("/devices", (_req, res, next) => {
+router.get("/devices", (req, res, next) => {
   try {
-    const rows = db.prepare(`
+    const { deviceType } = req.query;
+    let query = `
       SELECT
         gd.*,
         v.vehicle_number,
@@ -178,10 +294,16 @@ router.get("/devices", (_req, res, next) => {
         v.model
       FROM gps_devices gd
       LEFT JOIN vehicles v ON v.id = gd.vehicle_id
-      ORDER BY gd.created_at DESC
-    `).all();
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+    if (deviceType) {
+      query += " AND gd.device_type = ?";
+      params.push(deviceType);
+    }
+    query += " ORDER BY gd.created_at DESC";
 
-    res.json({ data: rows });
+    res.json({ data: db.prepare(query).all(...params) });
   } catch (e) {
     next(e);
   }
@@ -190,6 +312,7 @@ router.get("/devices", (_req, res, next) => {
 const registerDeviceSchema = z.object({
   deviceIdentifier: z.string().min(1),
   vehicleId: z.string().optional(),
+  deviceType: z.enum(["meshsat", "teltonika"]).optional(),
   status: z.enum(["active", "inactive", "maintenance"]).default("active"),
 });
 
@@ -208,15 +331,15 @@ router.post("/devices", requireRole("admin", "fleet_admin", "fleet_manager"), (r
       devId = existing.id;
       db.prepare(`
         UPDATE gps_devices
-        SET vehicle_id = ?, status = ?, updated_at = datetime('now')
+        SET vehicle_id = ?, status = ?, device_type = COALESCE(?, device_type), updated_at = datetime('now')
         WHERE id = ?
-      `).run(input.vehicleId || null, input.status, devId);
+      `).run(input.vehicleId || null, input.status, input.deviceType ?? null, devId);
     } else {
       devId = uuid();
       db.prepare(`
-        INSERT INTO gps_devices (id, vehicle_id, device_identifier, status)
-        VALUES (?, ?, ?, ?)
-      `).run(devId, input.vehicleId || null, input.deviceIdentifier, input.status);
+        INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, status)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(devId, input.vehicleId || null, input.deviceIdentifier, input.deviceType ?? "meshsat", input.status);
     }
 
     // Update vehicle's gps_device_id reference if vehicleId provided

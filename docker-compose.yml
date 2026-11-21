@@ -33,5 +33,23 @@ services:
     depends_on:
       - api
 
+  teltonika-relay:
+    build:
+      context: ./services/teltonika-relay
+      dockerfile: Dockerfile
+    container_name: nac-fms-teltonika-relay
+    restart: unless-stopped
+    ports:
+      - "6056:6056"   # Teltonika AVL TCP protocol (point FMB125 server host/port here)
+      - "6057:6057"   # HTTP health endpoint
+    environment:
+      PORT: 6056
+      HEALTH_PORT: 6057
+      FMS_URL: ${FMS_URL:-https://fleet.dspng.tech}
+      # Must match TELEMETRY_API_KEY in apps/api/.env (shared with meshsat-relay)
+      FMS_API_KEY: ${TELEMETRY_API_KEY:-dev-telemetry-key-12345}
+    depends_on:
+      - api
+
 volumes:
   api-data:

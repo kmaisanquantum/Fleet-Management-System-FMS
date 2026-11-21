@@ -36,19 +36,101 @@ export function initSchema() {
   const schema = fs.readFileSync(schemaPath, "utf-8");
   db.exec(schema);
 
-  // Check & migrate columns for existing SQLite databases
-  try {
-    const gpsCols = db.prepare("PRAGMA table_info(gps_positions)").all() as { name: string }[];
-    const colNames = gpsCols.map((c) => c.name);
+  migrateExistingDatabase();
+}
 
-    if (!colNames.includes("altitude_m")) {
-      db.exec("ALTER TABLE gps_positions ADD COLUMN altitude_m REAL;");
-    }
-    if (!colNames.includes("battery_pct")) {
-      db.exec("ALTER TABLE gps_positions ADD COLUMN battery_pct REAL;");
-    }
-    if (!colNames.includes("source")) {
-      db.exec("ALTER TABLE gps_positions ADD COLUMN source TEXT NOT NULL DEFAULT 'telemetry';");
-    }
+/**
+ * Adds columns/constraints introduced after the initial release to databases
+ * created by older schema versions (CREATE TABLE IF NOT EXISTS will not alter
+ * an existing table).
+ */
+function migrateExistingDatabase() {
+  const addColumn = (table: string, column: string, definition: string) => {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+      }
+    } catch (e) {}
+  };
+
+  // gps_positions — Teltonika-specific telemetry fields
+  addColumn("gps_positions", "ignition_source", "TEXT");
+  addColumn("gps_positions", "movement_source", "TEXT");
+  addColumn("gps_positions", "gsm_signal", "INTEGER");
+  addColumn("gps_positions", "external_voltage_mv", "INTEGER");
+  addColumn("gps_positions", "geofence_zone_id", "TEXT");
+  addColumn("gps_positions", "trip_odometer", "REAL");
+  addColumn("gps_positions", "fuel_level_pct", "REAL");
+  addColumn("gps_positions", "engine_rpm", "INTEGER");
+  addColumn("gps_positions", "engine_hours", "REAL");
+  addColumn("gps_positions", "harsh_event", "TEXT");
+  addColumn("gps_positions", "driver_id_tag", "TEXT");
+  addColumn("gps_positions", "io_json", "TEXT");
+
+  // gps_devices — vendor/protocol discriminator
+  addColumn("gps_devices", "device_type", "TEXT NOT NULL DEFAULT 'meshsat'");
+
+  // vehicles — live-state fields fed by telemetry
+  addColumn("vehicles", "current_fuel_level_pct", "REAL");
+  addColumn("vehicles", "current_engine_hours", "REAL");
+
+  // CHECK constraints that gained new allowed values require a table rebuild
+  // in SQLite. Rebuild only when the new value is missing from the old DDL.
+  rebuildIfCheckMissing(
+    "driver_events",
+    "harsh_cornering",
+    `CREATE TABLE driver_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL CHECK(event_type IN ('speeding', 'harsh_braking', 'harsh_accel', 'excessive_idling', 'harsh_cornering', 'crash')),
+      vehicle_id TEXT REFERENCES vehicles(id),
+      driver_id TEXT REFERENCES drivers(id),
+      recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+      value REAL NOT NULL DEFAULT 0,
+      lat REAL,
+      lon REAL
+    );`
+  );
+
+  rebuildIfCheckMissing(
+    "fleet_exceptions",
+    "geofence",
+    `CREATE TABLE fleet_exceptions (
+      id TEXT PRIMARY KEY,
+      severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
+      category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence')),
+      rule_code TEXT NOT NULL,
+      vehicle_id TEXT REFERENCES vehicles(id),
+      driver_id TEXT REFERENCES drivers(id),
+      transaction_id TEXT REFERENCES vehicle_fuel_logs(id),
+      gps_position_id TEXT REFERENCES gps_positions(id),
+      description TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'investigating', 'resolved', 'dismissed')),
+      notes TEXT,
+      resolution TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT
+    );`
+  );
+}
+
+function rebuildIfCheckMissing(table: string, requiredValue: string, createSql: string) {
+  try {
+    const row = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) as { sql?: string } | undefined;
+    if (!row?.sql || row.sql.includes(`'${requiredValue}'`)) return;
+
+    const tmp = `${table}__old`;
+    const columnNames = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+      .map((c) => c.name)
+      .join(", ");
+
+    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec(`ALTER TABLE ${table} RENAME TO ${tmp};`);
+    db.exec(createSql);
+    db.exec(`INSERT INTO ${table} (${columnNames}) SELECT ${columnNames} FROM ${tmp};`);
+    db.exec(`DROP TABLE ${tmp};`);
+    db.exec("PRAGMA foreign_keys = ON;");
   } catch (e) {}
 }

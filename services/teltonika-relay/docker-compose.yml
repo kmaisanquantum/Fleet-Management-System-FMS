@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  teltonika-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teltonika-relay
+    ports:
+      - "6056:6056"
+      - "6057:6057"
+    environment:
+      PORT: 6056
+      HEALTH_PORT: 6057
+      FMS_URL: ${FMS_URL:-https://fleet.dspng.tech}
+      FMS_API_KEY: ${FMS_API_KEY:-dev-telemetry-key-12345}
+    restart: unless-stopped
