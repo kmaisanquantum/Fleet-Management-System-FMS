@@ -1,7 +1,7 @@
 # API Reference
 
 Base URL: `/api/v1`. All endpoints except `/auth/login` and `/auth/refresh`
-require `Authorization: Bearer <accessToken>`. For telemetry ingestion (`POST /gps/positions`), machine requests may optionally authenticate using `x-api-key: <TELEMETRY_API_KEY>`.
+require `Authorization: Bearer <accessToken>`. For telemetry ingestion (`POST /gps/positions`), machine requests may optionally authenticate using `x-api-key: <TELEMETRY_API_KEY>`. The richer Teltonika FMB125 ingest (`POST /api/telemetry/ingest`, mounted outside the `/api/v1` prefix) authenticates with `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>`.
 
 ## Auth — `/api/v1/auth`
 
@@ -27,6 +27,19 @@ require `Authorization: Bearer <accessToken>`. For telemetry ingestion (`POST /g
 | GET | `/positions?vehicleId=` | Get breadcrumb GPS position history for a vehicle |
 | GET | `/devices` | List registered GPS telemetry devices and vehicle bindings, filterable by `?deviceType=meshsat\|teltonika` |
 | POST | `/devices` | Register or update a GPS device binding (`deviceIdentifier`, `vehicleId`, `status`, `deviceType` = `meshsat` \| `teltonika`, default `meshsat`). Admin/Fleet Manager. |
+
+## Client Telemetry (rich FMB125 JSON) — `/api/telemetry`
+
+Mounted **outside** the `/api/v1` prefix. Used by the MeshSat gateway relay for rich Teltonika FMB125 JSON telemetry (IO elements + fuel) and by the client-facing telemetry pages.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/ingest` | Ingest one normalized FMB125 record. Auth: `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>` (timing-safe compare). Body: `{ imei, timestamp (ISO-8601), lat, lon, sats, speed_kmh, ignition, fuel_liters, io }`. Resolves the vehicle via `gps_devices.device_identifier = imei` (404 unknown, 400 unbound). Idempotent on `(imei, recorded_at)` → `201` on insert, `200 { duplicate: true }` on duplicate. Interprets IO elements into `fleet_exceptions` alert rows (overspeed 255, idling 251, unplug 252, towing 246, crash 247, geofence 175 / 155–174, immobilizer/DOUT 179, eco driving 253/254) and detects refuel/drain from fuel-level deltas. |
+| GET | `/latest` | Per-vehicle latest position, ignition, speed, satellites and fuel. Client-scoped. |
+| GET | `/summary?from&to` | Fuel consumption (refuelled/consumed), distance, per-vehicle efficiency and the alert/event log over a range. Client-scoped. |
+| GET | `/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). Client-scoped. |
+
+Client scoping: fleet/national roles (`admin`, `fleet_admin`, `fleet_manager`, `national_fuel_manager`, `executive`, `auditor`, `finance_officer`, `procurement_officer`) see all clients; a user carrying a `client_id` (e.g. the `client_user` role) sees only its own vehicles.
 
 ## Fuel Transactions — `/api/v1/fuel-transactions`
 

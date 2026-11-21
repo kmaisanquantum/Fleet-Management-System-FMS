@@ -51,6 +51,18 @@ To support machine-to-machine telemetry ingest without requiring user JWT logins
 
   Put the result in `.env` as `TELEMETRY_API_KEY=...` before running `docker compose up`.
 
+### 2.1 Rich FMB125 ingest authentication (`Bearer` token)
+
+The richer Teltonika FMB125 JSON path (`POST /api/telemetry/ingest`, see section 8) uses a **separate** bearer token:
+
+* **Header**: `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>`
+* **Config**: Set `TELEMETRY_INGEST_TOKEN` in the deployment environment. In Coolify this is set on the `api` service (Environment Variables). The API compares the header to this value with a timing-safe comparison and returns `401` if it is missing or wrong.
+* **Generate a strong token**:
+
+  ```bash
+  openssl rand -hex 32
+  ```
+
 ---
 
 ## 3. Device Registration & Binding (required)
@@ -89,6 +101,15 @@ curl -X POST https://fleet.dspng.tech/api/v1/gps/devices \
 ```
 
 Replace `860123456789012` with the IMEI reported by the FMB125 (also visible in the raw `imei` field of its webhook payload), and `v-101-uuid-here` with the target vehicle's `vehicle_id`.
+
+> **Production devices.** The two Teltonika FMB125 trackers in this deployment are registered in the seed (`apps/api/src/seed/seed.ts`, `TELTONIKA_TRACKERS`) as `gps_devices` rows with `device_type = 'teltonika'`:
+>
+> | IMEI | Bound to |
+> |---|---|
+> | `354018115690145` | V-101 |
+> | `354018115694907` | V-102 |
+>
+> To (re)register them on a live database without re-seeding, use the `POST /api/v1/gps/devices` call above with each IMEI as `deviceIdentifier` and `"deviceType": "teltonika"`.
 
 ---
 
@@ -300,3 +321,106 @@ MeshSat data still flows into the FMS map: GPS packets posted by the MeshSat gat
 ### Default Map Center & Zoom Configuration
 
 Because the FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`), the Live Fleet Map defaults to those coordinates whenever no vehicle currently has a GPS fix.
+
+---
+
+## 8. Rich FMB125 Ingest API — `POST /api/telemetry/ingest`
+
+For FMB125 trackers that forward JSON telemetry directly (e.g. the gateway at `meshsat.dspng.space` posting to `fleet.dspng.tech`), the FMS exposes a dedicated ingest endpoint with full AVL IO element support and idempotent writes.
+
+* **URL**: `POST https://fleet.dspng.tech/api/telemetry/ingest`
+* **Auth**: `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>` (see section 2.1)
+* **Route source**: `apps/api/src/routes/telemetry.ts` (mounted in `apps/api/src/index.ts`)
+
+### 8.1 Request body
+
+```json
+{
+  "imei": "354018115690145",
+  "timestamp": "2026-03-28T11:00:00Z",
+  "lat": -9.4438,
+  "lon": 147.1803,
+  "sats": 9,
+  "speed_kmh": 45,
+  "ignition": true,
+  "fuel_liters": 62.5,
+  "io": { "239": 1, "16": 123456, "21": 4, "255": 1, "12": 8450 }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `imei` | string | Device IMEI; resolved to a vehicle via `gps_devices.device_identifier`. |
+| `timestamp` | string | ISO-8601 date-time. Normalized to `YYYY-MM-DD HH:MM:SS`. |
+| `lat` / `lon` | number | WGS-84 coordinates. |
+| `sats` | number \| null | Satellites in fix. |
+| `speed_kmh` | number \| null | Speed in km/h. |
+| `ignition` | bool \| number \| null | Ignition state (IO 239 takes precedence when present). |
+| `fuel_liters` | number \| null | Absolute fuel level; drives refuel/drain detection and the fuel %. |
+| `io` | object | Raw Teltonika IO element map (`"<ioId>": value`). |
+
+### 8.2 Responses
+
+| Status | Meaning |
+|---|---|
+| `201` | Record stored; `{ data, alerts }` where `alerts` is the number of `fleet_exceptions` rows raised. |
+| `200` | Duplicate `(imei, recorded_at)` ignored — `{ duplicate: true }` (idempotent). |
+| `400` | Invalid payload, or the device is registered but not bound to a vehicle. |
+| `401` | Missing/invalid bearer token. |
+| `404` | Unknown IMEI (no matching `gps_devices` row). |
+
+### 8.3 IO element → alert mapping
+
+Truthy event-style IO elements are interpreted into `fleet_exceptions` rows; scalar telemetry IO (ignition, odometer, GSM, fuel counter) is stored on the position/live-state instead.
+
+| IO id | Meaning | Result |
+|---|---|---|
+| 255 | Overspeed | `RULE_OVERSPEED` (warning, telemetry) + driver `speeding` event |
+| 251 | Excessive idling | `RULE_EXCESSIVE_IDLING` (warning, telemetry) |
+| 252 | Device unplug / tamper | `RULE_DEVICE_UNPLUG` (critical, security) |
+| 246 | Towing detected | `RULE_TOWING_DETECTED` (critical, security) |
+| 247 | Crash detection | `RULE_CRASH_DETECTED` (critical, driver) + driver `crash` event |
+| 175 | Geofence event | `RULE_GEOFENCE_IO` (warning, geofence) |
+| 155–174 | Geofence zone N | `RULE_GEOFENCE_ZONE` (warning, geofence) |
+| 179 | Digital output / immobilizer (DOUT) | `RULE_IMMOBILIZER` (warning, security) |
+| 253 | Eco driving — harsh acceleration | `RULE_ECO_DRIVING` (info, driver) |
+| 254 | Eco driving — harsh braking | `RULE_ECO_DRIVING` (info, driver) |
+| 239 | Ignition | Position/live-state `ignition` |
+| 16 | Total odometer | Position/live-state `odometer` |
+| 21 | GSM signal | Position/live-state `gsm_signal` |
+| 12 / 13 | Fuel counter / fuel used | Consumed (informational) |
+
+**Refuel / drain.** A change in absolute `fuel_liters` of at least **5 L** since the previous fix raises `RULE_REFUEL_DETECTED` (info, fuel) or `RULE_FUEL_DRAIN` (warning, fuel).
+
+### 8.4 Client-facing read & reporting endpoints
+
+These are JWT-authenticated and scoped so that client-portal users (`client_user` role, carrying a `client_id`) only see their own vehicles:
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/telemetry/latest` | Latest position, ignition, speed, satellites and fuel per vehicle. |
+| GET | `/api/telemetry/summary?from&to` | Fuel refuelled/consumed, distance, efficiency and the alert log over a range. |
+| GET | `/api/telemetry/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). |
+
+In the web app these power **Vehicle Live Status** (`/telemetry`) and **Fuel & Alerts Report** (`/telemetry-report`), which includes the CSV export button and a printable view.
+
+### 8.5 Verification
+
+```bash
+curl -X POST https://fleet.dspng.tech/api/telemetry/ingest \
+  -H "Authorization: Bearer <TELEMETRY_INGEST_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "imei": "354018115690145",
+    "timestamp": "2026-03-28T11:00:00Z",
+    "lat": -9.4438,
+    "lon": 147.1803,
+    "sats": 9,
+    "speed_kmh": 45,
+    "ignition": true,
+    "fuel_liters": 62.5,
+    "io": { "239": 1, "16": 123456, "21": 4, "255": 1 }
+  }'
+```
+
+A `201` with `alerts >= 1` confirms the record was stored and the overspeed IO element raised an exception; re-sending the identical body returns `200 { "duplicate": true }`.

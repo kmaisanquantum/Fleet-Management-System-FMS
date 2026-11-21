@@ -21,6 +21,13 @@ CREATE TABLE IF NOT EXISTS role_permissions (
   PRIMARY KEY (role_id, permission_code)
 );
 
+-- Tenant boundary for fleet & telemetry data (separate from the fuel-domain airport_id)
+CREATE TABLE IF NOT EXISTS clients (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
@@ -28,6 +35,7 @@ CREATE TABLE IF NOT EXISTS users (
   full_name TEXT NOT NULL,
   role_id TEXT NOT NULL REFERENCES roles(id),
   airport_id TEXT,
+  client_id TEXT REFERENCES clients(id),
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -90,6 +98,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   fuel_type TEXT NOT NULL,
   department TEXT,
   location TEXT,
+  client_id TEXT REFERENCES clients(id),
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'under_repair', 'disposed')),
   acquisition_date TEXT,
   acquisition_cost REAL,
@@ -147,6 +156,7 @@ CREATE TABLE IF NOT EXISTS gps_devices (
   vehicle_id TEXT REFERENCES vehicles(id),
   device_identifier TEXT UNIQUE NOT NULL,
   device_type TEXT NOT NULL DEFAULT 'meshsat' CHECK(device_type IN ('meshsat', 'teltonika')),
+  client_id TEXT REFERENCES clients(id),
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'maintenance')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -177,7 +187,10 @@ CREATE TABLE IF NOT EXISTS gps_positions (
   engine_hours REAL,
   harsh_event TEXT,
   driver_id_tag TEXT,
-  io_json TEXT
+  io_json TEXT,
+  imei TEXT,
+  sats INTEGER,
+  fuel_liters REAL
 );
 
 CREATE TABLE IF NOT EXISTS fuel_cards (
@@ -251,7 +264,7 @@ CREATE TABLE IF NOT EXISTS vehicle_fuel_logs (
 CREATE TABLE IF NOT EXISTS fleet_exceptions (
   id TEXT PRIMARY KEY,
   severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
-  category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence')),
+  category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence', 'telemetry')),
   rule_code TEXT NOT NULL,
   vehicle_id TEXT REFERENCES vehicles(id),
   driver_id TEXT REFERENCES drivers(id),

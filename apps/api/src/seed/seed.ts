@@ -16,7 +16,7 @@ const tables = [
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
   "vehicle_allocations", "drivers", "vehicles", "audit_logs", "alerts",
-  "users", "role_permissions", "permissions", "roles"
+  "users", "clients", "role_permissions", "permissions", "roles"
 ];
 
 for (const t of tables) {
@@ -32,7 +32,8 @@ const ROLES = [
   ["driver", "Driver"],
   ["finance", "Finance"],
   ["management", "Management"],
-  ["fuel_operator", "Fuel Operator"]
+  ["fuel_operator", "Fuel Operator"],
+  ["client_user", "Client Portal User"]
 ] as const;
 
 const roleIds: Record<string, string> = {};
@@ -42,20 +43,34 @@ for (const [name, desc] of ROLES) {
   db.prepare(`INSERT INTO roles (id, name, description) VALUES (?, ?, ?)`).run(id, name, desc);
 }
 
+// --- Clients (tenants) ---
+// The tenant boundary for fleet & telemetry data. Client-role users only see
+// vehicles/devices carrying their client_id (see utils/scope.ts).
+const CLIENTS = [
+  { id: uuid(), name: "DSPNG Fleet Operations" },
+  { id: uuid(), name: "Highlands Logistics Ltd" },
+];
+for (const c of CLIENTS) {
+  db.prepare(`INSERT INTO clients (id, name) VALUES (?, ?)`).run(c.id, c.name);
+}
+
 // --- Users ---
 const passwordHash = bcrypt.hashSync("Admin@2026", 10);
-function makeUser(email: string, fullName: string, role: string) {
+function makeUser(email: string, fullName: string, role: string, clientId: string | null = null) {
   const id = uuid();
   db.prepare(`
-    INSERT INTO users (id, email, password_hash, full_name, role_id, status)
-    VALUES (?, ?, ?, ?, ?, 'active')
-  `).run(id, email, passwordHash, fullName, roleIds[role]);
+    INSERT INTO users (id, email, password_hash, full_name, role_id, client_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'active')
+  `).run(id, email, passwordHash, fullName, roleIds[role], clientId);
   return id;
 }
 
 const adminId = makeUser("admin@dspng.tech", "Admin User", "admin");
 makeUser("fleetmgr@dspng.tech", "Fleet Manager", "fleet_manager");
 makeUser("driver1@dspng.tech", "John Driver", "driver");
+// Client-portal users: scoped to their own client only
+makeUser("client1@dspng.tech", "DSPNG Client User", "client_user", CLIENTS[0].id);
+makeUser("client2@dspng.tech", "Highlands Client User", "client_user", CLIENTS[1].id);
 
 // --- Business Rules ---
 const BUSINESS_RULES = [
@@ -210,28 +225,30 @@ for (const v of VEHICLES) {
   const cardNum = `FC-9000-${v.vNum.replace("V-", "")}`;
   const deviceId = uuid();
   const devIdent = `GPS-DEV-${v.vNum.replace("V-", "")}`;
+  // Tenant assignment: V-105 belongs to the second client, the rest to the first
+  const clientId = v.vNum === "V-105" ? CLIENTS[1].id : CLIENTS[0].id;
 
   // Insert Vehicle first
   db.prepare(`
     INSERT INTO vehicles (
       id, vehicle_number, registration_number, make, model, year, vehicle_type,
-      fuel_type, department, location, status, tank_capacity_litres, expected_km_per_l,
+      fuel_type, department, location, client_id, status, tank_capacity_litres, expected_km_per_l,
       gps_device_id, fuel_card_id, current_odometer, current_latitude, current_longitude,
       current_location_name, last_gps_fix_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `).run(
     v.id, v.vNum, v.reg, v.make, v.model, v.year, v.vType, v.fuelType, v.dept,
-    v.loc, v.status, v.tankCap, v.expectedKmL, deviceId, cardId, v.odometer,
+    v.loc, clientId, v.status, v.tankCap, v.expectedKmL, deviceId, cardId, v.odometer,
     v.lat, v.lon, v.loc, nowIso
   );
 
   // Insert GPS device
   db.prepare(`
-    INSERT INTO gps_devices (id, vehicle_id, device_identifier, status)
-    VALUES (?, ?, ?, 'active')
-  `).run(deviceId, v.id, devIdent);
+    INSERT INTO gps_devices (id, vehicle_id, device_identifier, client_id, status)
+    VALUES (?, ?, ?, ?, 'active')
+  `).run(deviceId, v.id, devIdent, clientId);
 
   // Insert Fuel Card
   db.prepare(`
@@ -261,6 +278,21 @@ for (const v of VEHICLES) {
       speeds[i], 180, ignitions[i], v.odometer - ((speeds.length - i) * 10), recTime
     );
   }
+}
+
+// --- Teltonika FMB125 trackers (registered by IMEI as device_identifier) ---
+// These forward JSON telemetry via meshsat.dspng.space to /api/telemetry/ingest.
+const TELTONIKA_TRACKERS = [
+  { imei: "354018115690145", vehicleId: VEHICLES[0].id, clientId: CLIENTS[0].id },
+  { imei: "354018115694907", vehicleId: VEHICLES[1].id, clientId: CLIENTS[0].id },
+];
+for (const t of TELTONIKA_TRACKERS) {
+  const devId = uuid();
+  db.prepare(`
+    INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status)
+    VALUES (?, ?, ?, 'teltonika', ?, 'active')
+  `).run(devId, t.vehicleId, t.imei, t.clientId);
+  db.prepare("UPDATE vehicles SET gps_device_id = ? WHERE id = ?").run(devId, t.vehicleId);
 }
 
 // --- Geofences ---

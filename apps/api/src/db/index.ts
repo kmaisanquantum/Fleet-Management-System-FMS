@@ -68,12 +68,29 @@ function migrateExistingDatabase() {
   addColumn("gps_positions", "driver_id_tag", "TEXT");
   addColumn("gps_positions", "io_json", "TEXT");
 
+  // gps_positions — rich Teltonika FMB125 telemetry (imei-keyed, idempotent ingest)
+  addColumn("gps_positions", "imei", "TEXT");
+  addColumn("gps_positions", "sats", "INTEGER");
+  addColumn("gps_positions", "fuel_liters", "REAL");
+
   // gps_devices — vendor/protocol discriminator
   addColumn("gps_devices", "device_type", "TEXT NOT NULL DEFAULT 'meshsat'");
 
   // vehicles — live-state fields fed by telemetry
   addColumn("vehicles", "current_fuel_level_pct", "REAL");
   addColumn("vehicles", "current_engine_hours", "REAL");
+
+  // Client (tenant) scoping — added after the initial release
+  addColumn("users", "client_id", "TEXT REFERENCES clients(id)");
+  addColumn("vehicles", "client_id", "TEXT REFERENCES clients(id)");
+  addColumn("gps_devices", "client_id", "TEXT REFERENCES clients(id)");
+
+  // Indexes that reference the columns added above (created here so they work
+  // on databases that predate those columns).
+  runIgnoreErrors("CREATE UNIQUE INDEX IF NOT EXISTS uq_gps_positions_imei_time ON gps_positions(imei, recorded_at) WHERE imei IS NOT NULL;");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_positions_imei ON gps_positions(imei, recorded_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_vehicles_client ON vehicles(client_id);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_devices_client ON gps_devices(client_id);");
 
   // CHECK constraints that gained new allowed values require a table rebuild
   // in SQLite. Rebuild only when the new value is missing from the old DDL.
@@ -94,11 +111,11 @@ function migrateExistingDatabase() {
 
   rebuildIfCheckMissing(
     "fleet_exceptions",
-    "geofence",
+    "telemetry",
     `CREATE TABLE fleet_exceptions (
       id TEXT PRIMARY KEY,
       severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
-      category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence')),
+      category TEXT NOT NULL CHECK(category IN ('fuel', 'gps', 'driver', 'vehicle', 'maintenance', 'route', 'security', 'compliance', 'geofence', 'telemetry')),
       rule_code TEXT NOT NULL,
       vehicle_id TEXT REFERENCES vehicles(id),
       driver_id TEXT REFERENCES drivers(id),
@@ -112,6 +129,12 @@ function migrateExistingDatabase() {
       resolved_at TEXT
     );`
   );
+}
+
+function runIgnoreErrors(sql: string) {
+  try {
+    db.exec(sql);
+  } catch (e) {}
 }
 
 function rebuildIfCheckMissing(table: string, requiredValue: string, createSql: string) {

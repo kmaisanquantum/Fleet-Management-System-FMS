@@ -16,7 +16,7 @@ describe("Business Rules & Settings API Tests", () => {
     const adminRole = db.prepare("SELECT id FROM roles WHERE name = 'admin'").get() as any;
     const adminRoleId = adminRole ? adminRole.id : uuid();
     if (!adminRole) {
-      db.prepare("INSERT INTO roles (id, name, description) VALUES (?, 'admin', 'Admin')").run(adminRoleId, "admin");
+      db.prepare("INSERT INTO roles (id, name, description) VALUES (?, ?, ?)").run(adminRoleId, "admin", "Admin");
     }
 
     adminId = uuid();
@@ -29,7 +29,7 @@ describe("Business Rules & Settings API Tests", () => {
     const driverRole = db.prepare("SELECT id FROM roles WHERE name = 'driver'").get() as any;
     const driverRoleId = driverRole ? driverRole.id : uuid();
     if (!driverRole) {
-      db.prepare("INSERT INTO roles (id, name, description) VALUES (?, 'driver', 'Driver')").run(driverRoleId, "driver");
+      db.prepare("INSERT INTO roles (id, name, description) VALUES (?, ?, ?)").run(driverRoleId, "driver", "Driver");
     }
 
     driverUserId = uuid();

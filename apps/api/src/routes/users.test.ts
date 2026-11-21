@@ -14,7 +14,7 @@ describe("Users router endpoints unit test", () => {
     const role = db.prepare(`SELECT id FROM roles WHERE name = 'admin'`).get() as any;
     adminRoleId = role ? role.id : uuid();
     if (!role) {
-      db.prepare(`INSERT INTO roles (id, name, description) VALUES (?, 'admin', 'Systems Admin')`).run(adminRoleId, 'admin');
+      db.prepare(`INSERT INTO roles (id, name, description) VALUES (?, ?, ?)`).run(adminRoleId, 'admin', 'Systems Admin');
     }
 
     const s = uuid().substring(0, 6);

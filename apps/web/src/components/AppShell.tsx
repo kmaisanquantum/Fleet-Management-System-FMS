@@ -5,8 +5,17 @@ import { useAuth } from "../context/AuthContext";
 const NAV_GROUPS: {
   title: string;
   adminOnly?: boolean;
+  clientPortal?: boolean;
   items: { to: string; label: string; adminOnly?: boolean }[];
 }[] = [
+  {
+    title: "Client Telemetry",
+    clientPortal: true,
+    items: [
+      { to: "/telemetry", label: "Vehicle Live Status" },
+      { to: "/telemetry-report", label: "Fuel & Alerts Report" },
+    ],
+  },
   {
     title: "Fleet Intelligence",
     items: [
@@ -48,7 +57,11 @@ export default function AppShell() {
   const navigate = useNavigate();
   const [navOpen, setNavOpen] = useState(false);
 
+  const isClientPortal = user?.role === "client_user";
+
   const visibleNavGroups = NAV_GROUPS.map((group) => {
+    // Client-portal users only see the client telemetry group
+    if (isClientPortal && !group.clientPortal) return null;
     if (group.adminOnly && user?.role !== "admin") return null;
     const items = group.items.filter((item) => !(item.adminOnly && user?.role !== "admin"));
     if (items.length === 0) return null;

@@ -49,3 +49,20 @@ tank dashboards, the low-stock alerting logic, future predictive
 maintenance — be built and tested against realistic data now, with the
 actual ingestion pipeline swappable in later without changing anything
 above the `iot_readings` table.
+
+## Fleet telematics (Teltonika FMB125)
+
+Vehicle GPS/AVL telemetry is a separate, already-built pipeline from the
+fuel-sensor IoT above. Teltonika FMB125 trackers forward rich JSON (GNSS +
+AVL IO element map) to the FMS ingest endpoint
+`POST /api/telemetry/ingest`, authenticated with
+`Authorization: Bearer <TELEMETRY_INGEST_TOKEN>`. The endpoint resolves the
+device IMEI to a vehicle, stores the position idempotently, interprets IO
+elements into `fleet_exceptions` alerts (overspeed, idling, unplug, towing,
+crash, geofence, immobilizer, eco driving) and derives refuel/drain events
+from fuel-level deltas.
+
+See `MESHSAT_INTEGRATION.md` section 8 for the full endpoint contract, IO
+mapping table, and device-registration steps, and `API.md` for the
+client-scoped read/report endpoints (`/api/telemetry/latest`,
+`/summary`, `/export`).

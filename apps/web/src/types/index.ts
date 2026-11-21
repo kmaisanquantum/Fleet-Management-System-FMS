@@ -4,6 +4,7 @@ export interface AuthUser {
   fullName: string;
   role: string;
   airportId: string | null;
+  clientId?: string | null;
 }
 
 export interface Airport {

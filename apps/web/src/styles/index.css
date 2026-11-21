@@ -52,3 +52,9 @@
     @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium;
   }
 }
+
+@media print {
+  .no-print { display: none !important; }
+  body, .panel { background: #ffffff !important; color: #000000 !important; }
+  .table-shell th, .table-shell td { color: #000000 !important; border-color: #cccccc !important; }
+}
