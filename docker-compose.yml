@@ -14,6 +14,9 @@ services:
       DB_PATH: /app/data/fms.db
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
       MAX_ALLOWED_VARIANCE_PCT: ${MAX_ALLOWED_VARIANCE_PCT:-0.5}
+      # Shared secret for machine-to-machine telemetry ingest (x-api-key). Must match
+      # the FMS_API_KEY used by the meshsat-relay / teltonika-relay services.
+      TELEMETRY_API_KEY: ${TELEMETRY_API_KEY}
     volumes:
       - api-data:/app/data
     healthcheck:
@@ -48,6 +51,21 @@ services:
       FMS_URL: ${FMS_URL:-https://fleet.dspng.tech}
       # Must match TELEMETRY_API_KEY in apps/api/.env (shared with meshsat-relay)
       FMS_API_KEY: ${TELEMETRY_API_KEY:-dev-telemetry-key-12345}
+    depends_on:
+      - api
+
+  meshsat-relay:
+    build:
+      context: ./services/meshsat-relay
+      dockerfile: Dockerfile
+    container_name: nac-meshsat-relay
+    restart: unless-stopped
+    ports:
+      - "6055:6055"
+    environment:
+      PORT: 6055
+      FMS_URL: http://api:4000
+      FMS_API_KEY: ${TELEMETRY_API_KEY}
     depends_on:
       - api
 

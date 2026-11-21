@@ -17,6 +17,18 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", service: "MeshSat FMS Telemetry Relay", targetFmsUrl: FMS_URL });
 });
 
+app.get("/", (_req: Request, res: Response) => {
+  res.json({
+    status: "ok",
+    service: "MeshSat FMS Telemetry Relay",
+    endpoints: {
+      health: "GET /health",
+      webhook: "POST /webhook (aliases: /webhook/meshsat, /api/v1/telemetry)",
+    },
+    targetFmsUrl: `${FMS_URL}/api/v1/gps/positions`,
+  });
+});
+
 /**
  * Normalizes incoming MeshSat/Meshtastic webhook payloads into standard FMS GPS format.
  */
