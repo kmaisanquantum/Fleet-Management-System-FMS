@@ -8,7 +8,7 @@
  *
  * Note: the embedded page is served over HTTPS and the MeshSat server must
  * permit framing (no `X-Frame-Options: DENY`/`SAMEORIGIN`, and a CSP
- * `frame-ancestors` that includes this origin) — see MESHSAT_INTEGRATION.md §6.
+ * `frame-ancestors` that includes this origin) — see MESHSAT_INTEGRATION.md §7.
  */
 const DEFAULT_MESHSAT_MAP_URL = "https://meshsat.dspng.space/map";
 
@@ -27,10 +27,8 @@ export default function LiveFleetMap() {
       <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
         <iframe
           src={meshsatMapUrl}
-          title="MeshSat Live Fleet Map"
+          title="MeshSat Live Map"
           className="w-full h-full border-0"
-          allow="geolocation"
-          referrerPolicy="no-referrer-when-downgrade"
         />
       </div>
     </div>
