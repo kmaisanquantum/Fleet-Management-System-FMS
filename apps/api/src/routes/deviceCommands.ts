@@ -10,20 +10,17 @@ import { writeAudit } from "../utils/audit";
 /**
  * Remote device configuration / control (Teltonika Codec 12).
  *
- * Commands are queued locally, then handed to the MeshSat relay's `/api/cmd`
- * endpoint (meshsat.dspng.space) which delivers them to the tracker over its
- * next TCP session (5027). Delivery is therefore asynchronous: a queued
- * command shows as "Queued / Pending Next Tracker Sync" until the tracker's
+ * Commands are queued locally, then handed to the MeshSat VPS command endpoint
+ * (meshsat.dspng.space `/api/cmd`), which queues them and delivers them to the
+ * tracker over its next TCP session (5027). Delivery is therefore asynchronous:
+ * a command shows as "Queued / Pending Next Tracker Sync" until the tracker's
  * next sync.
  */
 const router = Router();
 router.use(requireAuth);
 
-const MESHSAT_CMD_URL = (process.env.MESHSAT_CMD_URL || "https://meshsat.dspng.space").replace(/\/$/, "");
-const MESHSAT_CMD_TOKEN = process.env.MESHSAT_CMD_TOKEN || "";
-
 /** Roles permitted to dispatch device commands (client-role users are excluded). */
-const COMMAND_ROLES = ["admin", "fleet_admin", "fleet_manager"];
+const COMMAND_ROLES = ["admin", "fleet_manager"];
 
 const commandSchema = z.object({
   imei: z.string().min(1),
@@ -65,13 +62,40 @@ export function buildCommand(type: "setparam" | "setdigout" | "raw", params: Rec
   return { command: { type: "raw", command: params.command } };
 }
 
-/** Hands a command to the MeshSat relay for delivery to the tracker's TCP session. */
-export async function forwardCommand(imei: string, command: Record<string, unknown>) {
-  const res = await fetch(`${MESHSAT_CMD_URL}/api/cmd`, {
+/**
+ * Serializes a built command into the Teltonika command string the VPS
+ * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1`).
+ */
+export function serializeCommand(command: Record<string, unknown>): string {
+  switch (command.type) {
+    case "setparam":
+      return `setparam ${command.param_id}:${command.value}`;
+    case "setdigout":
+      return `setdigout ${command.dout}`;
+    case "raw":
+      return String(command.command);
+    default:
+      return JSON.stringify(command);
+  }
+}
+
+/**
+ * Hands a command to the MeshSat VPS command endpoint
+ * (`POST ${MESHSAT_CMD_URL}/api/cmd`), authenticated with
+ * `Authorization: Bearer ${MESHSAT_CMD_TOKEN}`. Both env vars are read at call
+ * time so they can be configured (Coolify) without a rebuild.
+ *
+ * Payload contract: `{ "imei": "<15-digit>", "command": "<teltonika-cmd>" }`.
+ * The VPS also accepts `cmd` as a fallback key — we always send `command`.
+ */
+export async function forwardCommand(imei: string, command: string) {
+  const baseUrl = (process.env.MESHSAT_CMD_URL || "https://meshsat.dspng.space").replace(/\/$/, "");
+  const token = process.env.MESHSAT_CMD_TOKEN || "";
+  const res = await fetch(`${baseUrl}/api/cmd`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-cmd-token": MESHSAT_CMD_TOKEN,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({ imei, command }),
   });
@@ -118,23 +142,25 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
       newValue: { imei, type, params },
     });
 
-    // Forward to the MeshSat relay. A relay rejection is terminal ('failed');
-    // an unreachable relay leaves the row 'queued' for a later retry.
+    // Forward to the MeshSat VPS command endpoint. A 2xx means the command was
+    // accepted for delivery ('sent'); any rejection or transport failure is
+    // terminal ('failed') and the error is recorded for the operator.
     let status = "queued";
     let sentAt: string | null = null;
     let responseText: string | null = null;
     try {
-      const result = await forwardCommand(imei, built.command);
+      const result = await forwardCommand(imei, serializeCommand(built.command));
       responseText = (result.text || "").slice(0, 1000) || null;
       if (result.ok) {
         status = "sent";
         sentAt = new Date().toISOString().replace("T", " ").substring(0, 19);
       } else {
         status = "failed";
+        responseText = responseText || `Command endpoint returned HTTP ${result.status}`;
       }
     } catch (err: any) {
-      responseText = `Relay unreachable: ${err?.message ?? String(err)}`;
-      status = "queued";
+      responseText = `Command endpoint unreachable: ${err?.message ?? String(err)}`;
+      status = "failed";
     }
 
     db.prepare("UPDATE device_commands SET status = ?, sent_at = ?, response_text = ? WHERE id = ?").run(status, sentAt, responseText, id);

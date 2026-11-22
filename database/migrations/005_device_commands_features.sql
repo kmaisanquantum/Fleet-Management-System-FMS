@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei,
 
 -- ------------------------------------------------------------------ --
 -- Outbound device commands (Codec 12) queued for the tracker's next TCP
--- session via the MeshSat relay (/api/cmd).
+-- session via the meshsat.dspng.space VPS command endpoint (POST /api/cmd).
 -- ------------------------------------------------------------------ --
 CREATE TABLE IF NOT EXISTS device_commands (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

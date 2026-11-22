@@ -1,6 +1,5 @@
-import crypto from "crypto";
 import dotenv from "dotenv";
-import express, { NextFunction, Request, Response } from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 
 dotenv.config();
@@ -15,8 +14,6 @@ const FMS_API_KEY = process.env.FMS_API_KEY || "dev-telemetry-key-12345";
  * fallback so the relay works against either FMS deployment.
  */
 const TELEMETRY_INGEST_TOKEN = process.env.TELEMETRY_INGEST_TOKEN || "";
-/** Shared secret accepted on `POST /api/cmd` (matches FMS `MESHSAT_CMD_TOKEN`). */
-const MESHSAT_CMD_TOKEN = process.env.MESHSAT_CMD_TOKEN || "";
 
 const app = express();
 app.use(cors());
@@ -34,68 +31,11 @@ app.get("/", (_req: Request, res: Response) => {
     endpoints: {
       health: "GET /health",
       webhook: "POST /webhook (aliases: /webhook/meshsat, /api/v1/telemetry)",
-      queueCommand: "POST /api/cmd (x-cmd-token) — queue a Codec-12 command for the tracker's next TCP session",
-      drainCommands: "GET /api/cmd/:imei (x-cmd-token) — pull (and clear) queued commands for a TCP session",
     },
     targetFmsUrl: TELEMETRY_INGEST_TOKEN ? `${FMS_URL}/api/telemetry/ingest` : `${FMS_URL}/api/v1/gps/positions`,
+    notes:
+      "Remote command queuing (Codec 12) lives on the meshsat.dspng.space VPS (POST /api/cmd), not in this relay.",
   });
-});
-
-/* ------------------------------------------------------------------ *
- * Remote command queue (/api/cmd)
- *
- * The FMS queues Codec-12 commands (setparam/setdigout) and hands them to
- * this relay. Trackers connect over TCP 5027 and only accept data during a
- * session, so commands are held in memory keyed by IMEI and drained when the
- * tracker's next session starts (GET /api/cmd/:imei).
- * ------------------------------------------------------------------ */
-
-interface QueuedCommand {
-  id: string;
-  imei: string;
-  command: unknown;
-  queuedAt: string;
-}
-
-const commandQueue = new Map<string, QueuedCommand[]>();
-
-/** Constant-time token check for the relay command endpoints. */
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
-}
-
-function requireCmdToken(req: Request, res: Response, next: NextFunction) {
-  const auth = req.header("authorization");
-  const bearer = auth && auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const provided = req.header("x-cmd-token") || bearer || "";
-  if (!MESHSAT_CMD_TOKEN || !provided || !safeEqual(provided, MESHSAT_CMD_TOKEN)) {
-    return res.status(401).json({ error: "Unauthorized: valid command token required" });
-  }
-  next();
-}
-
-app.post("/api/cmd", requireCmdToken, (req: Request, res: Response) => {
-  const { imei, command } = req.body || {};
-  if (!imei || typeof imei !== "string" || !command) {
-    return res.status(400).json({ error: "Payload must include { imei, command }" });
-  }
-  const entry: QueuedCommand = { id: crypto.randomUUID(), imei, command, queuedAt: new Date().toISOString() };
-  const list = commandQueue.get(imei) ?? [];
-  list.push(entry);
-  commandQueue.set(imei, list);
-  console.log(`Queued command ${entry.id} for IMEI ${imei} (depth ${list.length}).`);
-  res.status(202).json({ status: "queued", id: entry.id, imei, queueDepth: list.length });
-});
-
-/** Drains (and clears) the queued commands for an IMEI — called on the next TCP session. */
-app.get("/api/cmd/:imei", requireCmdToken, (req: Request, res: Response) => {
-  const { imei } = req.params;
-  const list = commandQueue.get(imei) ?? [];
-  commandQueue.delete(imei);
-  res.json({ data: list });
 });
 
 interface NormalizedTelemetry {
@@ -357,9 +297,8 @@ if (require.main === module) {
         TELEMETRY_INGEST_TOKEN ? `${FMS_URL}/api/telemetry/ingest (Bearer)` : `${FMS_URL}/api/v1/gps/positions (x-api-key)`
       }`
     );
-    console.log(`Command queue endpoint: POST /api/cmd (token ${MESHSAT_CMD_TOKEN ? "configured" : "NOT configured"})`);
   });
 }
 
-export { app, normalizeMeshSatPayload, forwardToFms, commandQueue };
+export { app, normalizeMeshSatPayload, forwardToFms };
 export type { NormalizedTelemetry };

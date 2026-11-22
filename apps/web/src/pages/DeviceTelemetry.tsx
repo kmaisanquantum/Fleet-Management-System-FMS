@@ -11,7 +11,7 @@ import { apiGet } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
 /** Roles allowed to dispatch remote device commands (mirrors the API guard). */
-const COMMAND_ROLES = new Set(["admin", "fleet_admin", "fleet_manager"]);
+const COMMAND_ROLES = new Set(["admin", "fleet_manager"]);
 
 const STATUS_STYLES: Record<string, string> = {
   queued: "bg-amber-400/15 text-amber-400",

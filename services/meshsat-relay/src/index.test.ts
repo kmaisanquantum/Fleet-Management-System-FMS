@@ -5,12 +5,12 @@ import type { Server } from "http";
  * MeshSat relay tests.
  *
  * The relay module is imported dynamically *after* the environment is set so
- * its module-scope config (command token, ingest token, FMS URL) is captured
- * for the test run. The Express app is exercised on an ephemeral port; the
- * outbound FMS forward is checked with a mocked fetch.
+ * its module-scope config (ingest token, FMS URL) is captured for the test run.
+ * The Express app is exercised on an ephemeral port; the outbound FMS forward
+ * is checked with a mocked fetch. Remote command queuing lives on the
+ * meshsat.dspng.space VPS, so this relay has no /api/cmd route.
  */
 
-const CMD_TOKEN = "test-relay-cmd-token";
 const INGEST_TOKEN = "test-relay-ingest-token";
 
 let server: Server;
@@ -18,7 +18,6 @@ let baseUrl: string;
 
 let normalizeMeshSatPayload: (body: any) => any;
 let forwardToFms: (normalized: any) => Promise<{ status: number; body: any; via: string }>;
-let commandQueue: Map<string, any[]>;
 
 /** Minimal Response-like object for the mocked fetch. */
 function fakeResponse(ok: boolean, status: number, body = "{}") {
@@ -30,16 +29,17 @@ function fakeResponse(ok: boolean, status: number, body = "{}") {
   } as unknown as Response;
 }
 
+/** Real fetch, captured before any stub, so the test HTTP client still works. */
+const realFetch = globalThis.fetch;
+
 describe("MeshSat relay", () => {
   beforeAll(async () => {
-    process.env.MESHSAT_CMD_TOKEN = CMD_TOKEN;
     process.env.TELEMETRY_INGEST_TOKEN = INGEST_TOKEN;
     process.env.FMS_URL = "https://fms.test";
 
     const mod = await import("./index");
     normalizeMeshSatPayload = mod.normalizeMeshSatPayload;
     forwardToFms = mod.forwardToFms;
-    commandQueue = mod.commandQueue as Map<string, any[]>;
 
     await new Promise<void>((resolve) => {
       server = mod.app.listen(0, () => resolve());
@@ -54,39 +54,6 @@ describe("MeshSat relay", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    commandQueue.clear();
-  });
-
-  /* --------------------------- /api/cmd --------------------------- */
-
-  it("rejects a command without a valid token", async () => {
-    const res = await fetch(`${baseUrl}/api/cmd`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imei: "354018115690145", command: { type: "setdigout", dout: 1 } }),
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("queues a command and drains it for the next TCP session", async () => {
-    const queued = await fetch(`${baseUrl}/api/cmd`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-cmd-token": CMD_TOKEN },
-      body: JSON.stringify({ imei: "354018115690145", command: { type: "setdigout", dout: 1 } }),
-    });
-    expect(queued.status).toBe(202);
-    const queuedBody: any = await queued.json();
-    expect(queuedBody.status).toBe("queued");
-    expect(queuedBody.queueDepth).toBe(1);
-
-    const drain = await fetch(`${baseUrl}/api/cmd/354018115690145`, { headers: { "x-cmd-token": CMD_TOKEN } });
-    const drained: any = await drain.json();
-    expect(drained.data).toHaveLength(1);
-    expect(drained.data[0].command).toEqual({ type: "setdigout", dout: 1 });
-
-    // Draining clears the queue
-    const second = await fetch(`${baseUrl}/api/cmd/354018115690145`, { headers: { "x-cmd-token": CMD_TOKEN } });
-    expect(((await second.json()) as any).data).toHaveLength(0);
   });
 
   /* ----------------------- payload normalization ------------------ */
@@ -159,5 +126,44 @@ describe("MeshSat relay", () => {
     const [url, opts] = fetchMock.mock.calls[1];
     expect(String(url)).toBe("https://fms.test/api/v1/gps/positions");
     expect((opts as any).headers["x-api-key"]).toBeTruthy();
+  });
+
+  /* ---------------------- webhook (end to end) -------------------- */
+
+  it("accepts a Teltonika webhook and forwards it to the FMS ingest endpoint", async () => {
+    // Only intercept the outbound FMS call; the test client's own request to
+    // the relay under test must reach the real server.
+    const fetchMock = vi.fn((url: any, opts?: any) => {
+      if (String(url).startsWith("https://fms.test")) return Promise.resolve(fakeResponse(true, 201, '{"data":{}}'));
+      return realFetch(url, opts);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await fetch(`${baseUrl}/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imei: "354018115694907",
+        records: [
+          {
+            gps: { latitude: -9.44, longitude: 147.18, speed: 12, angle: 10, satellites: 7 },
+            io: { ignition: 1 },
+            timestamp: "2026-03-28T11:00:00Z",
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.via).toBe("ingest");
+    // The mock also sees the test client's own request to the relay; pick the
+    // outbound FMS forward.
+    const forwardCall = fetchMock.mock.calls.find(([u]) => String(u).startsWith("https://fms.test"));
+    expect(forwardCall).toBeDefined();
+    const [url, opts] = forwardCall!;
+    expect(String(url)).toBe("https://fms.test/api/telemetry/ingest");
+    expect((opts as any).headers.Authorization).toBe(`Bearer ${INGEST_TOKEN}`);
+    expect(JSON.parse((opts as any).body).imei).toBe("354018115694907");
   });
 });

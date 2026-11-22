@@ -128,9 +128,10 @@ The `services/meshsat-relay` microservice runs alongside the FMS stack, receives
    # Must match on api + relay.
    TELEMETRY_INGEST_TOKEN=<openssl rand -hex 32 output>
 
-   # Remote command queue shared secret (api → relay POST /api/cmd).
-   # Must match on api + relay.
-   MESHSAT_CMD_TOKEN=<openssl rand -hex 32 output>
+   # Remote command auth (api → POST https://meshsat.dspng.space/api/cmd as Bearer).
+   # Set this in Coolify; do not commit the real value.
+   MESHSAT_CMD_TOKEN=<set in Coolify environment>
+   MESHSAT_CMD_URL=https://meshsat.dspng.space
    ```
 
 2. **Run with Docker Compose** (from the repository root, so the relay joins the same network as `api`):
@@ -152,11 +153,10 @@ The `services/meshsat-relay` microservice runs alongside the FMS stack, receives
        FMS_URL: http://api:4000
        FMS_API_KEY: ${TELEMETRY_API_KEY}
        TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
-       MESHSAT_CMD_TOKEN: ${MESHSAT_CMD_TOKEN}
      depends_on:
        - api
    ```
-   `FMS_URL` points at the internal `api` service, so telemetry never leaves the Docker network on the way to ingest.
+   `FMS_URL` points at the internal `api` service, so telemetry never leaves the Docker network on the way to ingest. (Remote command queuing is handled by the meshsat.dspng.space VPS, so the relay needs no command token.)
 
    > To run the relay standalone instead, copy `services/meshsat-relay/.env.example` to `.env`, set `FMS_URL` to the FMS base URL, and `docker compose up -d --build` from within `services/meshsat-relay`.
 
@@ -440,43 +440,44 @@ A `201` with `alerts >= 1` confirms the record was stored and the overspeed IO e
 
 ## 9. Remote Configuration & Control (Teltonika Codec 12)
 
-FMS users with an elevated role can push remote config/control commands (`setparam`, `setdigout`, `raw`) to a tracker. Commands are **queued** in `device_commands` and handed to the MeshSat relay, which delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+FMS users with the `admin` or `fleet_manager` role can push remote config/control commands (`setparam`, `setdigout`, `raw`) to a tracker. The `client_user` role is read-only (403). Commands are **queued** in `device_commands` and POSTed to the **meshsat.dspng.space VPS command endpoint**, which queues them and delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+
+> The command queue lives on the **meshsat.dspng.space VPS** (its `/api/cmd` on `127.0.0.1:6051` → Codec 12 over TCP 5027). This repository's `services/meshsat-relay` only forwards telemetry; it does **not** host `/api/cmd`.
 
 ### 9.1 Command flow
 
 ```
    Web UI (device panel)
         │  POST /api/telemetry/commands  {imei, type, params}
-        │  JWT: admin | fleet_admin | fleet_manager   (client_user = 403)
+        │  JWT: admin | fleet_manager        (client_user = 403)
         ▼
    FMS api  ──► device_commands row (status = 'queued')  +  audit_logs
-        │  POST ${MESHSAT_CMD_URL}/api/cmd   {imei, command}
-        │  x-cmd-token: ${MESHSAT_CMD_TOKEN}
+        │  POST https://meshsat.dspng.space/api/cmd   {"imei":"<15-digit>","command":"<teltonika-cmd>"}
+        │  Authorization: Bearer ${MESHSAT_CMD_TOKEN}
         ▼
-   MeshSat relay (127.0.0.1:6051 local / meshsat.dspng.space public)
+   meshsat.dspng.space VPS (local /api/cmd on 127.0.0.1:6051)
         │  enqueue per-IMEI; deliver on the tracker's next TCP session
         ▼
    FMB125 tracker  ──(Codec 12 over TCP 5027)──►  applies setparam / setdigout
         │
-        ▼  (relay accepts → FMS api marks the row 'sent' / 'acked')
+        ▼  (VPS accepts 2xx → FMS api marks the row 'sent'; later 'acked')
 ```
 
-Status transitions: `queued` → `sent` → `acked`, or `failed` (relay rejected / cancelled). If the relay is **unreachable** the row stays `queued` for a later retry.
+Status transitions: `queued` → `sent` → `acked`, or `failed`. A 2xx from the VPS sets `sent` + `sent_at`; a non-2xx response or an unreachable endpoint sets `failed` with the error in `response_text`.
 
 ### 9.2 Endpoints
 
-The relay exposes a command-queue endpoint authenticated by the shared secret (accepted as either `x-cmd-token: <MESHSAT_CMD_TOKEN>` or `Authorization: Bearer <MESHSAT_CMD_TOKEN>`):
+The **VPS** exposes the command endpoint (contract confirmed with the operator):
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/cmd` | `{ imei, command }` — queue a Codec-12 command for the tracker's next TCP session. Returns `202 { status: 'queued', id, imei, queueDepth }`. |
-| GET | `/api/cmd/:imei` | Drain and return the pending queue for an IMEI (used by the TCP session handler). |
+| POST | `https://meshsat.dspng.space/api/cmd` | Body `{ "imei": "<15-digit>", "command": "<teltonika-cmd>" }` (`cmd` is accepted as a fallback key — FMS always sends `command`). Auth: `Authorization: Bearer <MESHSAT_CMD_TOKEN>`. Returns 2xx when queued for the tracker's next TCP session. |
 
 The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/telemetry/commands`):
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/` | Queue a command (see `API.md`). Forwarded to `${MESHSAT_CMD_URL}/api/cmd` with `x-cmd-token`. |
+| POST | `/` | Queue a command (see `API.md`). POSTed to `${MESHSAT_CMD_URL}/api/cmd` with `Authorization: Bearer`. |
 | GET | `/?imei=` | Tenant-scoped queue + delivery history. |
 | POST | `/:id/cancel` | Cancel a still-`queued` row. |
 
@@ -484,8 +485,8 @@ The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/tele
 
 | Variable | Where | Purpose |
 |---|---|---|
-| `MESHSAT_CMD_URL` | api | Relay base URL (e.g. `https://meshsat.dspng.space`). |
-| `MESHSAT_CMD_TOKEN` | api + relay | Shared secret: api sends `x-cmd-token`, relay validates it. |
+| `MESHSAT_CMD_URL` | api | VPS base URL (`https://meshsat.dspng.space`). |
+| `MESHSAT_CMD_TOKEN` | api | Secret sent as `Authorization: Bearer`. Set in **Coolify**; do not commit. |
 | `TELEMETRY_INGEST_TOKEN` | api + relay | Bearer token for the rich telemetry ingest (also used by the relay forward). |
 
 ### 9.4 Verification
@@ -502,4 +503,4 @@ curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \
   -H "Authorization: Bearer <JWT>"
 ```
 
-A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (relay accepted) or `queued` (relay unreachable) confirms the command was persisted and forwarded.
+A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (VPS accepted for delivery) or `failed` (endpoint rejected/unreachable) confirms the command was persisted and dispatched.

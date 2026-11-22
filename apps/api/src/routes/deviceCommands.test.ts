@@ -4,7 +4,7 @@ import type { Server } from "http";
 import { v4 as uuid } from "uuid";
 import { db, initSchema } from "../db";
 import { signAccessToken, AuthUser } from "../middleware/auth";
-import deviceCommandsRouter, { buildCommand } from "./deviceCommands";
+import deviceCommandsRouter, { buildCommand, serializeCommand } from "./deviceCommands";
 
 /**
  * Device-command (Teltonika Codec 12) route tests.
@@ -26,6 +26,7 @@ let imeiB: string;
 
 let adminToken: string;
 let fleetManagerBToken: string;
+let fleetAdminToken: string;
 let clientAToken: string;
 
 let fleetManagerBUser: AuthUser;
@@ -60,9 +61,9 @@ function fakeResponse(ok: boolean, status: number, body = "{}") {
 const realFetch = globalThis.fetch;
 
 /**
- * Stubs the global fetch so only the route's relay forward (`.../api/cmd`) is
- * intercepted; the test client's own requests fall through to the real fetch.
- * Returns the relay mock so callers can assert on it.
+ * Stubs the global fetch so only the route's command-endpoint forward
+ * (`.../api/cmd`) is intercepted; the test client's own requests fall through
+ * to the real fetch. Returns the mock so callers can assert on it.
  */
 function stubRelay(impl: (url: any, opts: any) => Promise<Response> | Response) {
   const relayMock = vi.fn(impl);
@@ -76,6 +77,10 @@ function stubRelay(impl: (url: any, opts: any) => Promise<Response> | Response) 
 describe("Device commands router", () => {
   beforeAll(async () => {
     initSchema();
+
+    // Configure the command endpoint contract (read lazily by forwardCommand).
+    process.env.MESHSAT_CMD_URL = "https://meshsat.test";
+    process.env.MESHSAT_CMD_TOKEN = "test-cmd-secret";
 
     const s = uuid().substring(0, 8);
 
@@ -104,17 +109,22 @@ describe("Device commands router", () => {
 
     // Roles + users (audit_logs FK requires real user rows)
     db.prepare("INSERT OR IGNORE INTO roles (id, name, description) VALUES (?, 'admin', ?)").run(uuid(), "Admin");
+    db.prepare("INSERT OR IGNORE INTO roles (id, name, description) VALUES (?, 'fleet_admin', ?)").run(uuid(), "Fleet Admin");
     db.prepare("INSERT OR IGNORE INTO roles (id, name, description) VALUES (?, 'fleet_manager', ?)").run(uuid(), "Fleet Manager");
     db.prepare("INSERT OR IGNORE INTO roles (id, name, description) VALUES (?, 'client_user', ?)").run(uuid(), "Client Portal User");
     const adminRole = db.prepare("SELECT id FROM roles WHERE name = 'admin'").get() as { id: string };
+    const fleetAdminRole = db.prepare("SELECT id FROM roles WHERE name = 'fleet_admin'").get() as { id: string };
     const fmRole = db.prepare("SELECT id FROM roles WHERE name = 'fleet_manager'").get() as { id: string };
     const clientRole = db.prepare("SELECT id FROM roles WHERE name = 'client_user'").get() as { id: string };
 
     const adminId = uuid();
+    const fleetAdminId = uuid();
     const fmBId = uuid();
     const clientId = uuid();
     db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', ?, ?, 'active')")
       .run(adminId, `cmd_admin_${s}@dspng.tech`, "Cmd Admin", adminRole.id);
+    db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', ?, ?, 'active')")
+      .run(fleetAdminId, `cmd_fa_${s}@dspng.tech`, "Cmd Fleet Admin", fleetAdminRole.id);
     db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', ?, ?, 'active')")
       .run(fmBId, `cmd_fmb_${s}@dspng.tech`, "Cmd FM B", fmRole.id);
     db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', ?, ?, 'active')")
@@ -124,10 +134,12 @@ describe("Device commands router", () => {
     db.prepare("INSERT INTO user_clients (user_id, client_id) VALUES (?, ?)").run(clientId, clientAId);
 
     const adminUser: AuthUser = { id: adminId, email: "admin@test", roleName: "admin", airportId: null, clientIds: [clientAId, clientBId] };
+    const fleetAdminUser: AuthUser = { id: fleetAdminId, email: "fa@test", roleName: "fleet_admin", airportId: null, clientIds: [] };
     fleetManagerBUser = { id: fmBId, email: "fm@test", roleName: "fleet_manager", airportId: null, clientIds: [clientBId] };
     const clientAUser: AuthUser = { id: clientId, email: "client@test", roleName: "client_user", airportId: null, clientIds: [clientAId] };
 
     adminToken = signAccessToken(adminUser);
+    fleetAdminToken = signAccessToken(fleetAdminUser);
     fleetManagerBToken = signAccessToken(fleetManagerBUser);
     clientAToken = signAccessToken(clientAUser);
 
@@ -164,6 +176,12 @@ describe("Device commands router", () => {
 
   it("forbids the client_user role", async () => {
     const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 1 } }, clientAToken);
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/role/i);
+  });
+
+  it("forbids the fleet_admin role (only admin and fleet_manager may command)", async () => {
+    const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 1 } }, fleetAdminToken);
     expect(status).toBe(403);
     expect(body.error).toMatch(/role/i);
   });
@@ -214,13 +232,16 @@ describe("Device commands router", () => {
     expect(body.data.command_type).toBe("setparam");
     expect(body.data.sent_at).toBeTruthy();
 
-    // Forwarded to the relay's /api/cmd with the imei + command
+    // Forwarded to the VPS command endpoint with the Bearer token and the
+    // { imei, command } payload contract (command is a Teltonika string).
     expect(relay).toHaveBeenCalledTimes(1);
     const [url, opts] = relay.mock.calls[0];
-    expect(String(url)).toContain("/api/cmd");
+    expect(String(url)).toBe("https://meshsat.test/api/cmd");
+    expect((opts as any).headers.Authorization).toBe("Bearer test-cmd-secret");
     const sent = JSON.parse((opts as any).body);
     expect(sent.imei).toBe(imeiA);
-    expect(sent.command).toEqual({ type: "setparam", param_id: 1580, value: 80 });
+    expect(sent.command).toBe("setparam 1580:80");
+    expect(sent.cmd).toBeUndefined();
 
     // Persisted + audited
     const row = db.prepare("SELECT * FROM device_commands WHERE id = ?").get(body.data.id) as any;
@@ -237,11 +258,11 @@ describe("Device commands router", () => {
     expect(body.data.response_text).toContain("boom");
   });
 
-  it("leaves a command queued when the relay is unreachable", async () => {
+  it("marks a command failed when the command endpoint is unreachable", async () => {
     stubRelay(() => Promise.reject(new Error("ECONNREFUSED")));
     const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 0 } }, adminToken);
     expect(status).toBe(201);
-    expect(body.data.status).toBe("queued");
+    expect(body.data.status).toBe("failed");
     expect(body.data.response_text).toMatch(/unreachable/i);
   });
 
@@ -270,17 +291,22 @@ describe("Device commands router", () => {
   });
 
   it("cancels a still-queued command", async () => {
-    stubRelay(() => Promise.reject(new Error("offline")));
-    const created = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 1 } }, adminToken);
-    expect(created.body.data.status).toBe("queued");
+    // Insert a queued row directly — with the VPS contract a forward either
+    // succeeds ('sent') or fails ('failed'), so a row only stays 'queued' if
+    // it is awaiting dispatch. Exercising cancel therefore needs a queued row.
+    const queuedId = uuid();
+    db.prepare(`
+      INSERT INTO device_commands (id, imei, vehicle_id, command_type, payload_json, status, requested_by)
+      VALUES (?, ?, ?, 'setdigout', ?, 'queued', NULL)
+    `).run(queuedId, imeiA, vehicleAId, JSON.stringify({ type: "setdigout", dout: 1 }));
 
-    const { status, body } = await post(`/${created.body.data.id}/cancel`, {}, adminToken);
+    const { status, body } = await post(`/${queuedId}/cancel`, {}, adminToken);
     expect(status).toBe(200);
     expect(body.data.status).toBe("failed");
     expect(body.data.response_text).toMatch(/cancel/i);
 
     // A non-queued command cannot be cancelled again
-    const again = await post(`/${created.body.data.id}/cancel`, {}, adminToken);
+    const again = await post(`/${queuedId}/cancel`, {}, adminToken);
     expect(again.status).toBe(409);
   });
 
@@ -293,5 +319,11 @@ describe("Device commands router", () => {
     expect(buildCommand("setdigout", { dout: 1 })).toEqual({ command: { type: "setdigout", dout: 1 } });
     expect(buildCommand("setdigout", { dout: 2 }).error).toBeTruthy();
     expect(buildCommand("raw", { command: "getinfo" })).toEqual({ command: { type: "raw", command: "getinfo" } });
+  });
+
+  it("serializes built commands into Teltonika command strings", () => {
+    expect(serializeCommand({ type: "setparam", param_id: 1580, value: 80 })).toBe("setparam 1580:80");
+    expect(serializeCommand({ type: "setdigout", dout: 1 })).toBe("setdigout 1");
+    expect(serializeCommand({ type: "raw", command: "getinfo" })).toBe("getinfo");
   });
 });

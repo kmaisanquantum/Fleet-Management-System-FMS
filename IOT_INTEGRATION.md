@@ -112,8 +112,10 @@ Defaults seeded on first run:
 
 ### Remote configuration & control (Codec 12)
 
-Users with an elevated role (`admin`, `fleet_admin`, `fleet_manager`) can push
-Codec-12 commands (`setparam`, `setdigout`, `raw`) to a tracker through
-`POST /api/telemetry/commands`. Commands are queued in `device_commands` and
-forwarded to the MeshSat relay for delivery over the tracker's next TCP session.
+Users with an elevated role (`admin` or `fleet_manager`; `client_user` is
+read-only) can push Codec-12 commands (`setparam`, `setdigout`, `raw`) to a
+tracker through `POST /api/telemetry/commands`. Commands are queued in
+`device_commands` and POSTed to the MeshSat VPS command endpoint
+(`https://meshsat.dspng.space/api/cmd`, `Authorization: Bearer $MESHSAT_CMD_TOKEN`)
+for delivery over the tracker's next TCP session (5027).
 See `MESHSAT_INTEGRATION.md` section 9 for the command flow.
