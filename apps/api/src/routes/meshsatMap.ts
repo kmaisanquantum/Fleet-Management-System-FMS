@@ -14,8 +14,12 @@ import { verifyAccessToken } from "../middleware/auth";
  * `/api/meshsat-map/map` → `<MESHSAT_MAP_ORIGIN>/map` and
  * `/api/meshsat-map/api/positions` → `<MESHSAT_MAP_ORIGIN>/api/positions` (the
  * data endpoint the map's inline script polls). HTML responses have their
- * absolute and root-relative URLs rewritten to the proxy prefix, and framing
- * headers are stripped so the page renders inside the FMS iframe.
+ * absolute MeshSat URLs and root-relative URLs rewritten to the proxy prefix,
+ * and framing headers are stripped so the page renders inside the FMS iframe.
+ * Absolute URLs to *other* origins (OpenStreetMap tiles, unpkg scripts, ...)
+ * are deliberately left untouched so the browser fetches them directly —
+ * proxying them would fetch third-party assets server-side, which OSM blocks
+ * as a tile-usage-policy violation.
  *
  * Note: absolute-URL WebSocket/SSE connections opened by the map's inline script
  * cannot be rewritten by an HTTP proxy — see MESHSAT_INTEGRATION.md §7 for the
@@ -28,6 +32,15 @@ const PROXY_PREFIX = "/api/meshsat-map";
 /** Cookie that carries the FMS JWT for the map's same-origin sub-requests. */
 export const MAP_COOKIE_NAME = "fms_map_token";
 const MAP_COOKIE_MAX_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * Identifying User-Agent for upstream requests. Some third parties (e.g.
+ * OpenStreetMap) block anonymous/default clients, so if a tile request ever
+ * reaches the proxy (root-relative tile path) it is forwarded with this UA
+ * rather than Node's default. The preferred fix is that tiles load directly in
+ * the browser — see `rewriteMeshSatUrls`.
+ */
+const UPSTREAM_USER_AGENT = "FleetManagementSystem/1.0 (fleet.dspng.tech)";
 
 /** Configured map origin (no trailing slash), defaulting to the VPS. */
 function mapOrigin(): string {
@@ -121,15 +134,23 @@ export function sanitizeUpstreamHeaders(headers: Headers): Record<string, string
 }
 
 /**
- * Rewrite absolute MeshSat URLs and root-relative `src`/`href`/`action`/
- * `fetch(`/`url(` references to the proxy prefix so assets and data calls flow
- * back through the proxy. Already-prefixed paths are left untouched.
+ * Rewrite MeshSat-origin absolute URLs and root-relative `src`/`href`/`action`/
+ * `fetch(`/`url(` references to the proxy prefix so the map's own assets and
+ * data calls flow back through the proxy. Already-prefixed paths are left
+ * untouched.
+ *
+ * URLs that do **not** belong to the MeshSat origin are never rewritten:
+ *  - absolute URLs to other origins (e.g. `https://tile.openstreetmap.org/...`,
+ *    `https://unpkg.com/...`) load directly in the browser, and
+ *  - protocol-relative URLs (`//host/...`) are guarded against with `(?!\/)`,
+ *    since the root-relative rules below would otherwise turn `//host/x` into
+ *    `/api/meshsat-map//host/x` and drag a third-party asset through the proxy.
  */
 export function rewriteMeshSatUrls(html: string, origin: string): string {
   let out = html.split(origin).join(PROXY_PREFIX);
-  out = out.replace(/(src|href|action)=("|')\/(?!api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
-  out = out.replace(/fetch\((["'])\/(?!api\/meshsat-map)/gi, `fetch($1${PROXY_PREFIX}/`);
-  out = out.replace(/url\((["']?)\/(?!api\/meshsat-map)/gi, `url($1${PROXY_PREFIX}/`);
+  out = out.replace(/(src|href|action)=("|')\/(?!\/)(?!api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
+  out = out.replace(/fetch\((["'])\/(?!\/)(?!api\/meshsat-map)/gi, `fetch($1${PROXY_PREFIX}/`);
+  out = out.replace(/url\((["']?)\/(?!\/)(?!api\/meshsat-map)/gi, `url($1${PROXY_PREFIX}/`);
   return out;
 }
 
@@ -157,6 +178,7 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
       headers: {
         ...(authorization ? { authorization } : {}),
         accept: (req.headers.accept as string) || "*/*",
+        "user-agent": UPSTREAM_USER_AGENT,
       },
     });
   } catch {

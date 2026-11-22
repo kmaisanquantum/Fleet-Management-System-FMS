@@ -127,6 +127,35 @@ describe("MeshSat map proxy", () => {
     expect(body).toContain("url(/api/meshsat-map/bg.png)");
   });
 
+  it("leaves third-party absolute and protocol-relative URLs unrewritten", async () => {
+    const html =
+      '<!doctype html><html><head>' +
+      '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>' +
+      '<link href="//unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">' +
+      '</head><body>' +
+      '<img src="https://tile.openstreetmap.org/12/2048/2048.png">' +
+      '<img src="/assets/logo.png">' +
+      '<img src="https://meshsat.example.test/own.png">' +
+      "<style>body{background:url(//tile.openstreetmap.org/bg.png)}</style>" +
+      "</body></html>";
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    const body = await res.text();
+    // Third-party absolute URLs (OSM tiles, unpkg) and protocol-relative URLs
+    // are left untouched so the browser fetches them directly.
+    expect(body).toContain('src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"');
+    expect(body).toContain('href="//unpkg.com/leaflet@1.9.4/dist/leaflet.css"');
+    expect(body).toContain('src="https://tile.openstreetmap.org/12/2048/2048.png"');
+    expect(body).toContain("url(//tile.openstreetmap.org/bg.png)");
+    // MeshSat-origin absolute and root-relative URLs are rewritten to the proxy.
+    expect(body).toContain('src="/api/meshsat-map/own.png"');
+    expect(body).toContain('src="/api/meshsat-map/assets/logo.png"');
+  });
+
   it("strips X-Frame-Options and the CSP frame-ancestors directive", async () => {
     const calls: UpstreamCall[] = [];
     mockUpstream(
