@@ -28,6 +28,7 @@ import fleetAnalyticsRoutes from "./routes/fleetAnalytics";
 
 import gpsRoutes from "./routes/gps";
 import telemetryRoutes from "./routes/telemetry";
+import meshsatMapRoutes from "./routes/meshsatMap";
 import deviceCommandsRoutes from "./routes/deviceCommands";
 import fuelTransactionsRoutes from "./routes/fuelTransactions";
 import fleetOverviewRoutes from "./routes/fleetOverview";
@@ -74,6 +75,9 @@ app.use("/api/v1/gps", gpsRoutes);
 // (the telemetry router applies requireAuth to everything after /ingest).
 app.use("/api/telemetry/commands", deviceCommandsRoutes);
 app.use("/api/telemetry", telemetryRoutes);
+// Server-side proxy for the (credential-protected) MeshSat map UI. Mounted
+// under /api so the SPA can embed it same-origin; auth is enforced in the router.
+app.use("/api/meshsat-map", meshsatMapRoutes);
 app.use("/api/v1/fuel-transactions", fuelTransactionsRoutes);
 app.use("/api/v1/fleet", fleetOverviewRoutes);
 app.use("/api/v1/fleet", utilisationRoutes);
