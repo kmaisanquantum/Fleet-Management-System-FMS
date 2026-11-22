@@ -118,6 +118,32 @@ export function detectFuelDelta(previous: number | null, current: number | null)
   return null;
 }
 
+/** Configured fuel-counter IO rows (feature_key 'fuel_counter') with their scale. */
+export function loadFuelCounterRows(): { io_id: number; scale_factor: number }[] {
+  return db
+    .prepare("SELECT io_id, scale_factor FROM io_feature_map WHERE feature_key = 'fuel_counter' AND enabled = 1 ORDER BY io_id ASC")
+    .all() as { io_id: number; scale_factor: number }[];
+}
+
+/**
+ * Derives fuel_liters from a raw fuel-counter IO element when the relay does
+ * not send fuel_liters directly. The raw counter is multiplied by the row's
+ * configurable scale_factor (IO 12/13 report millilitres → 0.001 = litres), so
+ * fuel_liters always holds litres and never the raw counter.
+ */
+export function fuelLitersFromIo(
+  io: Record<string, number>,
+  rows: { io_id: number; scale_factor: number }[] = loadFuelCounterRows()
+): number | null {
+  for (const row of rows) {
+    const raw = io[String(row.io_id)];
+    if (raw === undefined || raw === null) continue;
+    const scale = Number(row.scale_factor) || 1;
+    return Number((Number(raw) * scale).toFixed(3));
+  }
+  return null;
+}
+
 /* ------------------------------------------------------------------ *
  * Ingest schema
  * ------------------------------------------------------------------ */
@@ -192,7 +218,10 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     const io = input.io ?? {};
     const odometer = input.odometer ?? ioValue(io, IO_ODOMETER) ?? 0;
     const gsmSignal = ioValue(io, IO_GSM) ?? null;
-    const fuelLiters = input.fuel_liters ?? null;
+    // Fuel: prefer an explicit fuel_liters; otherwise derive litres from the
+    // raw IO 12/13 fuel counter via its configured scale_factor. Never store
+    // the raw counter value in fuel_liters.
+    const fuelLiters = input.fuel_liters ?? fuelLitersFromIo(io);
     // IO 12/13 are the Teltonika fuel counters; keep the raw value alongside
     // io_json for diagnostics while refuel/drain is derived from fuel_liters.
     const fuelCounter = ioValue(io, IO_FUEL_COUNTER) ?? null;
@@ -331,24 +360,32 @@ export interface IoFeatureRow {
   label: string;
   value_type: string;
   enabled: number;
+  scale_factor: number;
 }
 
 /** Loads the enabled IO-ID -> feature mapping (configurable via the settings API). */
 export function loadIoFeatureMap(): IoFeatureRow[] {
   return db
-    .prepare("SELECT io_id, feature_key, label, value_type, enabled FROM io_feature_map WHERE enabled = 1 ORDER BY io_id ASC")
+    .prepare("SELECT io_id, feature_key, label, value_type, enabled, scale_factor FROM io_feature_map WHERE enabled = 1 ORDER BY io_id ASC")
     .all() as IoFeatureRow[];
 }
 
 /** Decodes a raw Teltonika IO payload into the configured feature list. */
 export function decodeIoFeatures(io: Record<string, number>, map: IoFeatureRow[] = loadIoFeatureMap()) {
-  return map.map((f) => ({
-    io_id: f.io_id,
-    feature_key: f.feature_key,
-    label: f.label,
-    value_type: f.value_type,
-    value: io[String(f.io_id)] ?? null,
-  }));
+  return map.map((f) => {
+    const raw = io[String(f.io_id)] ?? null;
+    const scale = Number(f.scale_factor) || 1;
+    return {
+      io_id: f.io_id,
+      feature_key: f.feature_key,
+      label: f.label,
+      value_type: f.value_type,
+      scale_factor: scale,
+      value: raw,
+      // Scaled (engineering-unit) value, e.g. fuel counter ml -> litres.
+      scaled_value: raw === null ? null : Number((Number(raw) * scale).toFixed(3)),
+    };
+  });
 }
 
 /**

@@ -19,6 +19,7 @@ interface IoFeatureRow {
   label: string;
   value_type: "event" | "scalar" | "boolean";
   enabled: number;
+  scale_factor: number;
 }
 
 interface ParamMapRow {
@@ -40,7 +41,7 @@ export default function Settings() {
 
   const [ioFeatures, setIoFeatures] = useState<IoFeatureRow[]>([]);
   const [paramMap, setParamMap] = useState<ParamMapRow[]>([]);
-  const [newIo, setNewIo] = useState({ io_id: "", feature_key: "", label: "", value_type: "event" as IoFeatureRow["value_type"] });
+  const [newIo, setNewIo] = useState({ io_id: "", feature_key: "", label: "", value_type: "event" as IoFeatureRow["value_type"], scale_factor: "1" });
   const [newParam, setNewParam] = useState({ feature_key: "", param_id: "", description: "" });
 
   useEffect(() => {
@@ -115,6 +116,7 @@ export default function Settings() {
         label: row.label,
         value_type: row.value_type,
         enabled: !!row.enabled,
+        scale_factor: Number(row.scale_factor) || 1,
       });
       setMessage({ type: "success", text: "IO feature mapping saved." });
       loadMaps();
@@ -130,8 +132,8 @@ export default function Settings() {
       return;
     }
     try {
-      await apiPost("/settings/io-features", { io_id, feature_key: newIo.feature_key, label: newIo.label, value_type: newIo.value_type });
-      setNewIo({ io_id: "", feature_key: "", label: "", value_type: "event" });
+      await apiPost("/settings/io-features", { io_id, feature_key: newIo.feature_key, label: newIo.label, value_type: newIo.value_type, scale_factor: Number(newIo.scale_factor) || 1 });
+      setNewIo({ io_id: "", feature_key: "", label: "", value_type: "event", scale_factor: "1" });
       setMessage({ type: "success", text: "IO feature mapping added." });
       loadMaps();
     } catch (err: any) {
@@ -298,6 +300,7 @@ export default function Settings() {
                 <th>Feature key</th>
                 <th>Label</th>
                 <th>Type</th>
+                <th>Scale</th>
                 <th>Enabled</th>
                 <th></th>
               </tr>
@@ -346,6 +349,16 @@ export default function Settings() {
                   </td>
                   <td>
                     <input
+                      type="number"
+                      step="0.001"
+                      disabled={!isAdmin}
+                      value={row.scale_factor}
+                      onChange={(e) => patchIoRow(row.id, { scale_factor: Number(e.target.value) })}
+                      className="input text-xs w-24 bg-base-950 border-base-700 text-ink-100 disabled:opacity-60"
+                    />
+                  </td>
+                  <td>
+                    <input
                       type="checkbox"
                       disabled={!isAdmin}
                       checked={!!row.enabled}
@@ -390,6 +403,11 @@ export default function Settings() {
                 <option value="scalar">scalar</option>
                 <option value="boolean">boolean</option>
               </select>
+            </div>
+            <div>
+              <label className="label">Scale</label>
+              <input type="number" step="0.001" value={newIo.scale_factor} onChange={(e) => setNewIo({ ...newIo, scale_factor: e.target.value })}
+                className="input text-xs w-24 bg-base-950 border-base-700 text-ink-100" />
             </div>
             <button onClick={addIoRow} className="btn-primary text-xs px-4 py-2">Add mapping</button>
           </div>

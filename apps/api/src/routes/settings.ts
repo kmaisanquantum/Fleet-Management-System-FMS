@@ -160,6 +160,8 @@ const ioFeatureSchema = z.object({
   label: z.string().min(1),
   value_type: z.enum(["event", "scalar", "boolean"]).optional(),
   enabled: z.boolean().optional(),
+  // Unit conversion for scalar IO (fuel counter ml -> L uses 0.001).
+  scale_factor: z.number().positive().optional(),
 });
 
 const ioFeatureUpdateSchema = ioFeatureSchema.partial();
@@ -179,10 +181,10 @@ router.post("/io-features", requireRole("admin"), (req, res, next) => {
   try {
     const parsed = ioFeatureSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid IO feature", details: parsed.error.flatten() });
-    const { io_id, feature_key, label, value_type, enabled } = parsed.data;
+    const { io_id, feature_key, label, value_type, enabled, scale_factor } = parsed.data;
     const id = uuid();
-    db.prepare("INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type, enabled) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, io_id, feature_key, label, value_type ?? "event", enabled === false ? 0 : 1);
+    db.prepare("INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type, enabled, scale_factor) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(id, io_id, feature_key, label, value_type ?? "event", enabled === false ? 0 : 1, scale_factor ?? 1);
     writeAudit({ userId: req.user!.id, action: "IO_FEATURE_CREATED", entity: "io_feature_map", entityId: id, newValue: parsed.data });
     res.status(201).json({ data: db.prepare("SELECT * FROM io_feature_map WHERE id = ?").get(id) });
   } catch (e) {
@@ -198,8 +200,8 @@ router.put("/io-features/:id", requireRole("admin"), (req, res, next) => {
     const parsed = ioFeatureUpdateSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid IO feature", details: parsed.error.flatten() });
     const next_ = { ...existing, ...parsed.data };
-    db.prepare("UPDATE io_feature_map SET io_id = ?, feature_key = ?, label = ?, value_type = ?, enabled = ? WHERE id = ?")
-      .run(next_.io_id, next_.feature_key, next_.label, next_.value_type, next_.enabled ? 1 : 0, req.params.id);
+    db.prepare("UPDATE io_feature_map SET io_id = ?, feature_key = ?, label = ?, value_type = ?, enabled = ?, scale_factor = ? WHERE id = ?")
+      .run(next_.io_id, next_.feature_key, next_.label, next_.value_type, next_.enabled ? 1 : 0, next_.scale_factor ?? 1, req.params.id);
     writeAudit({ userId: req.user!.id, action: "IO_FEATURE_UPDATED", entity: "io_feature_map", entityId: req.params.id, previousValue: existing, newValue: parsed.data });
     res.json({ data: db.prepare("SELECT * FROM io_feature_map WHERE id = ?").get(req.params.id) });
   } catch (e) {

@@ -9,6 +9,7 @@ import telemetryRouter, {
   interpretIoAlerts,
   detectFuelDelta,
   normalizeTimestamp,
+  fuelLitersFromIo,
 } from "./telemetry";
 import { resolveClientScopes } from "../utils/scope";
 
@@ -114,6 +115,15 @@ describe("Telemetry router", () => {
     // Registered but not bound to any vehicle
     db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, status) VALUES (?, NULL, ?, 'teltonika', 'active')")
       .run(uuid(), unboundImei);
+
+    // Deterministic fuel-counter scaling for the IO-only fuel fallback test
+    // (IO 12/13 report millilitres -> 0.001 = litres). Remove any pre-existing
+    // fuel rows (including legacy feature_key names) so the map is unambiguous.
+    db.prepare("DELETE FROM io_feature_map WHERE io_id IN (12, 13)").run();
+    db.prepare(`INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type, enabled, scale_factor)
+      VALUES ('test-fuel-12', 12, 'fuel_counter', 'GNSS Fuel Counter (primary)', 'scalar', 1, 0.001)`).run();
+    db.prepare(`INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type, enabled, scale_factor)
+      VALUES ('test-fuel-13', 13, 'fuel_counter', 'GNSS Fuel Counter (secondary)', 'scalar', 1, 0.001)`).run();
 
     // Users backing the scoped JWT callers (audit_logs FK requires the user to exist)
     const adminRoleId = uuid();
@@ -236,6 +246,19 @@ describe("Telemetry router", () => {
     expect(row.io_json).toContain("8421");
   });
 
+  it("derives fuel_liters from an IO-only fuel counter using scale_factor", async () => {
+    // No fuel_liters sent — the ingest must scale raw IO 12 (8421 ml) by the
+    // configured 0.001 factor and store litres, never the raw counter.
+    const { status } = await post(
+      "/ingest",
+      { ...validPayload(imeiA, "2026-03-28T13:00:00Z"), fuel_liters: null, io: { "12": 8421 } },
+      INGEST_TOKEN
+    );
+    expect(status).toBe(201);
+    const row = db.prepare("SELECT fuel_liters FROM gps_positions WHERE imei = ? AND recorded_at = ?").get(imeiA, "2026-03-28 13:00:00") as any;
+    expect(row.fuel_liters).toBeCloseTo(8.421, 3);
+  });
+
   it("ignores a duplicate record and reports it (idempotent)", async () => {
     const ts = "2026-03-28T11:00:00Z";
     const before = (db.prepare("SELECT COUNT(*) AS n FROM gps_positions WHERE imei = ?").get(imeiA) as any).n;
@@ -322,6 +345,9 @@ describe("Telemetry router", () => {
     const fuelFeature = body.data.features.find((f: any) => f.io_id === 12);
     expect(fuelFeature).toBeDefined();
     expect(fuelFeature.value).toBe(8421);
+    // The raw counter is also exposed scaled into litres (0.001)
+    expect(fuelFeature.scale_factor).toBeCloseTo(0.001, 6);
+    expect(fuelFeature.scaled_value).toBeCloseTo(8.421, 3);
     // Recent telemetry events are included
     expect(body.data.events.some((e: any) => e.rule_code === "RULE_OVERSPEED")).toBe(true);
   });
@@ -359,6 +385,15 @@ describe("Telemetry router", () => {
     expect(detectFuelDelta(60, 50)).toBe("drain");
     expect(detectFuelDelta(50, 52)).toBeNull();
     expect(detectFuelDelta(null, 60)).toBeNull();
+  });
+
+  it("scales a raw fuel counter into litres via scale_factor", () => {
+    const rows = [{ io_id: 12, scale_factor: 0.001 }];
+    expect(fuelLitersFromIo({ "12": 51300 }, rows)).toBeCloseTo(51.3, 3);
+    // Falls back to the secondary counter when the primary is absent
+    expect(fuelLitersFromIo({ "13": 42000 }, [{ io_id: 12, scale_factor: 0.001 }, { io_id: 13, scale_factor: 0.001 }])).toBeCloseTo(42, 3);
+    // No fuel counter present -> null (never a raw counter value)
+    expect(fuelLitersFromIo({ "239": 1 }, rows)).toBeNull();
   });
 
   it("normalizes ISO timestamps and validates the ingest schema", () => {

@@ -34,9 +34,28 @@ export function initSchema() {
   }
 
   const schema = fs.readFileSync(schemaPath, "utf-8");
+
+  // schema.sql's seed statements reference columns that post-date tables on an
+  // existing database (CREATE TABLE IF NOT EXISTS is a no-op there). Ensure
+  // those columns exist before the schema script runs so its seeds don't fail.
+  addColumn("io_feature_map", "scale_factor", "REAL NOT NULL DEFAULT 1");
+
   db.exec(schema);
 
   migrateExistingDatabase();
+}
+
+/**
+ * Adds a column to an existing table when it is missing. Safe to call before
+ * or after the table exists (a missing table is created fresh by schema.sql).
+ */
+function addColumn(table: string, column: string, definition: string) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+    }
+  } catch (e) {}
 }
 
 /**
@@ -45,15 +64,6 @@ export function initSchema() {
  * an existing table).
  */
 function migrateExistingDatabase() {
-  const addColumn = (table: string, column: string, definition: string) => {
-    try {
-      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-      if (!cols.some((c) => c.name === column)) {
-        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
-      }
-    } catch (e) {}
-  };
-
   // gps_positions — Teltonika-specific telemetry fields
   addColumn("gps_positions", "ignition_source", "TEXT");
   addColumn("gps_positions", "movement_source", "TEXT");
@@ -146,6 +156,7 @@ function migrateExistingDatabase() {
     label TEXT NOT NULL,
     value_type TEXT NOT NULL DEFAULT 'event' CHECK (value_type IN ('event', 'scalar', 'boolean')),
     enabled INTEGER NOT NULL DEFAULT 1,
+    scale_factor REAL NOT NULL DEFAULT 1,
     UNIQUE (io_id, feature_key)
   );`);
   runIgnoreErrors(`CREATE TABLE IF NOT EXISTS param_map (
@@ -158,22 +169,22 @@ function migrateExistingDatabase() {
 
   // Reference defaults for the IO feature map and Teltonika parameter map.
   // INSERT OR IGNORE keeps operator edits intact across restarts.
-  runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type) VALUES
-    ('iof-fuel-counter-12', 12,  'fuel_counter_12',   'GNSS Fuel Counter (primary)',      'scalar'),
-    ('iof-fuel-counter-13', 13,  'fuel_counter_13',   'GNSS Fuel Counter (secondary)',    'scalar'),
-    ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event'),
-    ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event'),
-    ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event'),
-    ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event'),
-    ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event'),
-    ('iof-towing',          246, 'towing',            'Towing Detected',                  'event'),
-    ('iof-crash',           247, 'crash',             'Crash Detection',                  'event'),
-    ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event'),
-    ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event'),
-    ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean'),
-    ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean'),
-    ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event'),
-    ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar');`);
+  runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
+    ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001),
+    ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001),
+    ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1),
+    ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1),
+    ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1),
+    ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event',   1),
+    ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event',   1),
+    ('iof-towing',          246, 'towing',            'Towing Detected',                  'event',   1),
+    ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1),
+    ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1),
+    ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1),
+    ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1),
+    ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1),
+    ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1),
+    ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar',  1);`);
   runIgnoreErrors(`INSERT OR IGNORE INTO param_map (id, feature_key, param_id, description) VALUES
     ('pm-overspeed-threshold', 'overspeed_threshold',   1580, 'Overspeeding threshold (km/h)'),
     ('pm-idling-timeout',      'idling_timeout',        1581, 'Excessive idling timeout (seconds)'),

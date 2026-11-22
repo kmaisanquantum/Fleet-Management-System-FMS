@@ -80,8 +80,14 @@ CREATE TABLE IF NOT EXISTS io_feature_map (
   label TEXT NOT NULL,
   value_type TEXT NOT NULL DEFAULT 'event' CHECK (value_type IN ('event', 'scalar', 'boolean')),
   enabled BOOLEAN NOT NULL DEFAULT true,
+  -- Multiplier applied to the raw IO value (fuel counters report millilitres,
+  -- so scale 0.001 yields litres).
+  scale_factor DOUBLE PRECISION NOT NULL DEFAULT 1,
   UNIQUE (io_id, feature_key)
 );
+
+-- scale_factor was added after the first release of this table.
+ALTER TABLE io_feature_map ADD COLUMN IF NOT EXISTS scale_factor DOUBLE PRECISION NOT NULL DEFAULT 1;
 
 -- ------------------------------------------------------------------ --
 -- Configurable Teltonika parameter-ID map used to build setparam commands.
@@ -109,24 +115,26 @@ ALTER TABLE fleet_exceptions ADD CONSTRAINT fleet_exceptions_category_check
 -- ------------------------------------------------------------------ --
 -- Default IO feature map (Teltonika FMB125 AVL element ids). These are
 -- starting defaults only — adjust to match the device's configured IO list.
+-- The GNSS fuel counters (IO 12/13) report millilitres, hence scale_factor
+-- 0.001 so the ingest fallback stores litres in fuel_liters.
 -- ------------------------------------------------------------------ --
-INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type) VALUES
-  ('iof-fuel-counter-12', 12,  'fuel_counter_12',   'GNSS Fuel Counter (primary)',        'scalar'),
-  ('iof-fuel-counter-13', 13,  'fuel_counter_13',   'GNSS Fuel Counter (secondary)',      'scalar'),
-  ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                       'event'),
-  ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration',   'event'),
-  ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',        'event'),
-  ('iof-idling',          251, 'idling',            'Excessive Idling',                   'event'),
-  ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',              'event'),
-  ('iof-towing',          246, 'towing',            'Towing Detected',                    'event'),
-  ('iof-crash',           247, 'crash',             'Crash Detection',                    'event'),
-  ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',             'event'),
-  ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)',   'event'),
-  ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',                'boolean'),
-  ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',            'boolean'),
-  ('iof-jamming',         249, 'jamming',           'Network Jamming',                    'event'),
-  ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',           'scalar')
-ON CONFLICT (io_id, feature_key) DO NOTHING;
+INSERT INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
+  ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',        'scalar',  0.001),
+  ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',      'scalar',  0.001),
+  ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                       'event',   1),
+  ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration',   'event',   1),
+  ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',        'event',   1),
+  ('iof-idling',          251, 'idling',            'Excessive Idling',                   'event',   1),
+  ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',              'event',   1),
+  ('iof-towing',          246, 'towing',            'Towing Detected',                    'event',   1),
+  ('iof-crash',           247, 'crash',             'Crash Detection',                    'event',   1),
+  ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',             'event',   1),
+  ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)',   'event',   1),
+  ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',                'boolean', 1),
+  ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',            'boolean', 1),
+  ('iof-jamming',         249, 'jamming',           'Network Jamming',                    'event',   1),
+  ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',           'scalar',  1)
+ON CONFLICT (io_id, feature_key) DO UPDATE SET scale_factor = EXCLUDED.scale_factor;
 
 -- ------------------------------------------------------------------ --
 -- Default Teltonika parameter map. Parameter ids are device-configurable;

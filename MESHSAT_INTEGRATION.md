@@ -366,7 +366,7 @@ For FMB125 trackers that forward JSON telemetry directly (e.g. the gateway at `m
 | `sats` | number \| null | Satellites in fix. |
 | `speed_kmh` | number \| null | Speed in km/h. |
 | `ignition` | bool \| number \| null | Ignition state (IO 239 takes precedence when present). |
-| `fuel_liters` | number \| null | Absolute fuel level; drives refuel/drain detection and the fuel %. |
+| `fuel_liters` | number \| null | Absolute fuel level in litres. Optional — when absent it is derived from the fuel counter (see 8.3). Drives refuel/drain detection and the fuel %. |
 | `io` | object | Raw Teltonika IO element map (`"<ioId>": value`). |
 
 ### 8.2 Responses
@@ -398,7 +398,9 @@ Truthy event-style IO elements are interpreted into `fleet_exceptions` rows; sca
 | 239 | Ignition | — | Position/live-state `ignition` |
 | 16 | Total odometer | — | Position/live-state `odometer` |
 | 21 | GSM signal | — | Position/live-state `gsm_signal` |
-| 12 / 13 | Fuel counter / fuel used | — | Stored raw in `io_json` (also returned as `fuelCounter` on ingest) |
+| 12 / 13 | Fuel counter (`feature_key='fuel_counter'`) | — | Raw value kept in `io_json` (also returned as `fuelCounter` on ingest); **scaled by the row's `scale_factor` to populate `fuel_liters`** when the fix has no explicit `fuel_liters` |
+
+**Fuel fallback.** When `fuel_liters` is null/absent, the ingest looks up the `io_feature_map` rows with `feature_key = 'fuel_counter'` (IO 12/13), reads the first present value from `io`, multiplies it by that row's configured `scale_factor` (seeded `0.001`, i.e. millilitres → litres) and stores the result as `fuel_liters`. This guarantees `fuel_liters` always holds litres — the raw counter is never written there. Operators can adjust or add fuel-counter rows (with their `scale_factor`) via `GET/POST/PUT/DELETE /api/v1/settings/io-features` if the device reports in a different unit.
 
 **Refuel / drain.** A change in absolute `fuel_liters` of at least **5 L** since the previous fix raises `RULE_REFUEL_DETECTED` (`type = refuel`, info, fuel) or `RULE_FUEL_DRAIN` (`type = fuel_drain`, warning, fuel).
 
@@ -409,7 +411,7 @@ These are JWT-authenticated and scoped so that client-portal users (`client_user
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/telemetry/latest` | Latest position, ignition, speed, satellites and fuel per vehicle. |
-| GET | `/api/telemetry/features/:imei` | Decoded IO feature grid (via `io_feature_map`) + live state + recent telemetry events for one device. 403 outside the caller's client scope. |
+| GET | `/api/telemetry/features/:imei` | Decoded IO feature grid (via `io_feature_map`, each feature including `scale_factor` and the scaled `scaled_value`) + live state + recent telemetry events for one device. 403 outside the caller's client scope. |
 | GET | `/api/telemetry/summary?from&to` | Fuel refuelled/consumed, distance, efficiency and the alert log over a range. |
 | GET | `/api/telemetry/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). |
 

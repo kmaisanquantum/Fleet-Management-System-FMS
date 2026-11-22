@@ -34,6 +34,11 @@ function fmtDate(value: string | null | undefined): string {
 function featureValue(f: IoFeature): string {
   if (f.value === null || f.value === undefined) return "—";
   if (f.value_type === "boolean") return f.value ? "ON" : "OFF";
+  // Scalar IO with a unit conversion (e.g. fuel counter ml -> L) shows the
+  // scaled value with the raw counter in parentheses.
+  if (f.scale_factor && f.scale_factor !== 1 && f.scaled_value !== null) {
+    return `${f.scaled_value} (raw ${f.value})`;
+  }
   return String(f.value);
 }
 

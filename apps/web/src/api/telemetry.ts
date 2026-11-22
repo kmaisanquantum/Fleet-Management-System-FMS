@@ -129,7 +129,9 @@ export interface IoFeature {
   feature_key: string;
   label: string;
   value_type: string;
+  scale_factor: number;
   value: number | null;
+  scaled_value: number | null;
 }
 
 export interface DeviceEvent {

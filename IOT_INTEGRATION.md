@@ -67,34 +67,42 @@ mapping table, and device-registration steps, and `API.md` for the
 client-scoped read/report endpoints (`/api/telemetry/latest`,
 `/summary`, `/export`).
 
+**Fuel fallback.** When a fix does not carry an explicit `fuel_liters`, the
+ingest derives it from the fuel counter (IO 12/13) so the `fuel_liters` column
+always holds litres: `fuel_liters = raw_counter × scale_factor`. The raw counter
+is never stored as `fuel_liters` (it stays in `io_json` for diagnostics).
+
 ### IO-ID → feature map (`io_feature_map`)
 
 The device's raw IO element map is decoded through a configurable
 `io_feature_map` (admin-editable via `GET/POST/PUT/DELETE /api/v1/settings/io-features`,
-surface in the Settings page). Defaults seeded on first run:
+surface in the Settings page). Each row has a `scale_factor` (default `1`)
+multiplied into the raw value for engineering-unit display and the fuel
+fallback. Defaults seeded on first run:
 
-| IO ID | Feature key | Label | Type |
-|---|---|---|---|
-| 12 | `fuel_counter_12` | GNSS Fuel Counter (primary) | scalar |
-| 13 | `fuel_counter_13` | GNSS Fuel Counter (secondary) | scalar |
-| 255 | `overspeed` | Overspeeding | event |
-| 253 | `eco_accel` | Eco Driving — Harsh Acceleration | event |
-| 254 | `eco_brake` | Eco Driving — Harsh Braking | event |
-| 251 | `idling` | Excessive Idling | event |
-| 252 | `power_unplug` | Power Unplug / Tamper | event |
-| 246 | `towing` | Towing Detected | event |
-| 247 | `crash` | Crash Detection | event |
-| 175 | `geofence_auto` | Auto / Manual Geofence | event |
-| 174 | `geofence_zone` | Geofence Zone Event (IO 155–174) | event |
-| 179 | `immobilizer` | DOUT1 / Immobilizer | boolean |
-| 179 | `dout_ignition` | DOUT Driven by Ignition | boolean |
-| 249 | `jamming` | Network Jamming | event |
-| 78 | `ibutton` | iButton / Driver ID Read | scalar |
+| IO ID | Feature key | Label | Type | Scale factor |
+|---|---|---|---|---|
+| 12 | `fuel_counter` | GNSS Fuel Counter (primary) | scalar | `0.001` (ml → L) |
+| 13 | `fuel_counter` | GNSS Fuel Counter (secondary) | scalar | `0.001` (ml → L) |
+| 255 | `overspeed` | Overspeeding | event | 1 |
+| 253 | `eco_accel` | Eco Driving — Harsh Acceleration | event | 1 |
+| 254 | `eco_brake` | Eco Driving — Harsh Braking | event | 1 |
+| 251 | `idling` | Excessive Idling | event | 1 |
+| 252 | `power_unplug` | Power Unplug / Tamper | event | 1 |
+| 246 | `towing` | Towing Detected | event | 1 |
+| 247 | `crash` | Crash Detection | event | 1 |
+| 175 | `geofence_auto` | Auto / Manual Geofence | event | 1 |
+| 174 | `geofence_zone` | Geofence Zone Event (IO 155–174) | event | 1 |
+| 179 | `immobilizer` | DOUT1 / Immobilizer | boolean | 1 |
+| 179 | `dout_ignition` | DOUT Driven by Ignition | boolean | 1 |
+| 249 | `jamming` | Network Jamming | event | 1 |
+| 78 | `ibutton` | iButton / Driver ID Read | scalar | 1 |
 
-`GET /api/telemetry/features/:imei` returns each feature with its latest decoded
-value alongside recent telemetry events. Because the mapping lives in the
-database, changing the FMB125 Configurator IO assignment (or adding a new
-element) needs no code change — add/edit the row instead.
+`GET /api/telemetry/features/:imei` returns each feature with its latest raw
+`value`, the row's `scale_factor`, and the scaled `scaled_value` (raw × factor)
+alongside recent telemetry events. Because the mapping lives in the database,
+changing the FMB125 Configurator IO assignment (or adding a new element) needs
+no code change — add/edit the row instead.
 
 ### Parameter-ID map (`param_map`)
 
