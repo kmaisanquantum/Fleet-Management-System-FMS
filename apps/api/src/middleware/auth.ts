@@ -42,15 +42,18 @@ export function verifyRefreshToken(token: string): { id: string } {
   return jwt.verify(token, JWT_SECRET) as { id: string };
 }
 
+/** Verify an FMS access (JWT) token, returning its payload. Throws if invalid. */
+export function verifyAccessToken(token: string): AuthUser {
+  return jwt.verify(token, JWT_SECRET) as AuthUser;
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Missing bearer token" });
   }
-  const token = header.slice("Bearer ".length);
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as AuthUser;
-    req.user = payload;
+    req.user = verifyAccessToken(header.slice("Bearer ".length));
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
