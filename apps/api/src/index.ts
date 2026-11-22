@@ -28,6 +28,7 @@ import fleetAnalyticsRoutes from "./routes/fleetAnalytics";
 
 import gpsRoutes from "./routes/gps";
 import telemetryRoutes from "./routes/telemetry";
+import meshsatRoutes from "./routes/meshsat";
 import deviceCommandsRoutes from "./routes/deviceCommands";
 import fuelTransactionsRoutes from "./routes/fuelTransactions";
 import fleetOverviewRoutes from "./routes/fleetOverview";
@@ -74,6 +75,8 @@ app.use("/api/v1/gps", gpsRoutes);
 // (the telemetry router applies requireAuth to everything after /ingest).
 app.use("/api/telemetry/commands", deviceCommandsRoutes);
 app.use("/api/telemetry", telemetryRoutes);
+// Hands the SPA a tokenized MeshSat map URL (secret injected server-side).
+app.use("/api/meshsat", meshsatRoutes);
 app.use("/api/v1/fuel-transactions", fuelTransactionsRoutes);
 app.use("/api/v1/fleet", fleetOverviewRoutes);
 app.use("/api/v1/fleet", utilisationRoutes);
