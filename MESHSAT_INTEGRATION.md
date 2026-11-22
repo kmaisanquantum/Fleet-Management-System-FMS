@@ -540,3 +540,54 @@ curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \
 ```
 
 A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (VPS accepted for delivery) or `failed` (endpoint rejected/unreachable) confirms the command was persisted and dispatched.
+
+---
+
+## 10. Deployment Runbook
+
+End-to-end checklist for standing up the Teltonika telemetry ingest + MeshSat map on the Coolify deployment. Run it top to bottom for a first-time deploy, and re-run the smoke test after any credential rotation.
+
+### 10.1 Coolify environment checklist
+
+Set these on the **api** service (Coolify → api → Environment Variables). Generate the secrets with `openssl rand -hex 32`; never commit the real values.
+
+| Variable | Value | Notes |
+|---|---|---|
+| `TELEMETRY_INGEST_TOKEN` | `<secret>` | Bearer token for `POST /api/telemetry/ingest` (section 2.1). |
+| `MESHSAT_CMD_URL` | `https://meshsat.dspng.space` | VPS base URL for remote commands (section 9). |
+| `MESHSAT_CMD_TOKEN` | `<rotated>` | `Authorization: Bearer` for the VPS `/api/cmd`. |
+| `MESHSAT_MAP_ORIGIN` | `https://meshsat.dspng.space` | MeshSat map origin (section 7). |
+| `MESHSAT_MAP_AUTH` | `admin:<password>` | Basic credential the proxy injects server-side. |
+
+**Web** build-time (Coolify → web → Environment Variables):
+
+| Variable | Value | Notes |
+|---|---|---|
+| `VITE_MESHSAT_MAP_URL` | *(unset)* | Optional override; normally unset so the page routes through the `/api/meshsat-map` proxy. |
+
+> Also ensure `TELEMETRY_API_KEY`, `JWT_SECRET` and `CORS_ORIGIN` are set (root `.env.example`).
+
+### 10.2 Schema & seed
+
+* The SQLite schema (`apps/api/src/db/schema.sql`) **auto-migrates on api start** — no manual step needed for the demo/embedded deployment. The consolidated Postgres DDL is `database/migrations/003_telemetry.sql` for non-SQLite deployments.
+* The seed binds both Teltonika FMB125 trackers (`354018115690145` → V-101, `354018115694907` → V-102) so telemetry resolves to a vehicle.
+
+### 10.3 Smoke test
+
+Post one fix and confirm the idempotent response:
+
+```bash
+curl -X POST https://fleet.dspng.tech/api/telemetry/ingest \
+  -H "Authorization: Bearer $TELEMETRY_INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"imei":"354018115690145","timestamp":"<ISO>","lat":-6.8,"lon":39.28,"sats":9,"speed_kmh":42,"ignition":true,"fuel_liters":51.3,"io":{"255":0,"12":51300}}'
+```
+
+* **First call → `201`** (record stored; `fuel_liters` taken from the explicit value).
+* **Re-send the identical body → `200 { "duplicate": true }`** (idempotent on `UNIQUE(imei, recorded_at)`).
+* With `"fuel_liters"` omitted instead, the ingest falls back to the IO 12 counter scaled by `io_feature_map.scale_factor` (`51300 × 0.001 = 51.3 L`).
+
+### 10.4 Post-deploy hardening
+
+* After the **first successful end-to-end test**, rotate `MESHSAT_CMD_TOKEN` **and** the MeshSat map password (`MESHSAT_MAP_AUTH`) — both were shared in plaintext during setup — and update the Coolify variables, then re-run the smoke test.
+
