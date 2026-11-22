@@ -324,13 +324,21 @@ Upon sending test packets, verify that a `gps_positions` row is created and the 
 
 ## 7. Live Fleet Map MeshSat Integration
 
-The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) now renders only the native FMS Telematics map (Leaflet), showing vehicles at their live GPS positions. The previous view switcher tab ("FMS Telematics Map" / "MeshSat Mesh Map") and its embedded `VITE_MESHSAT_MAP_URL` iframe have been **removed** — the cross-origin MeshSat map could not be embedded reliably due to browser auth/framing restrictions.
+The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) embeds the standalone MeshSat map UI (`https://meshsat.dspng.space/map`) as a single full-size `<iframe>`. The native FMS Leaflet/telematics map and its vehicle search/filter/refresh controls have been **removed** — the page is now just the page header plus the embedded MeshSat map. The embed URL is configurable via the `VITE_MESHSAT_MAP_URL` web env var (see `apps/web/.env.example`) and defaults to `https://meshsat.dspng.space/map` when unset.
 
-MeshSat data still flows into the FMS map: GPS packets posted by the MeshSat gateway to the telemetry relay in `services/meshsat-relay` are ingested and surfaced as live vehicle markers on this page. Embedding the MeshSat `/map` UI directly in the dashboard is no longer required, so the reverse-proxy / iframe-framing setup described in earlier revisions of this document is obsolete.
+**Embedding requirements.** For the iframe to render:
+* The MeshSat map must be served over **HTTPS** — an `https://` dashboard (`https://fleet.dspng.tech`) cannot frame an `http://` page (mixed-content blocking).
+* The MeshSat server must **permit framing by the dashboard origin**:
+  * it must **not** send `X-Frame-Options: DENY` or `X-Frame-Options: SAMEORIGIN`; and
+  * its `Content-Security-Policy` `frame-ancestors` directive must include `https://fleet.dspng.tech`, e.g. `frame-ancestors 'self' https://fleet.dspng.tech;`.
+
+If those headers are not relaxed, the browser refuses to display the frame and the page shows an empty area.
+
+MeshSat GPS packets posted by the gateway to the telemetry relay in `services/meshsat-relay` are still ingested into the FMS (`POST /api/telemetry/ingest`, sections 8–9) and surface as live markers inside the embedded MeshSat map.
 
 ### Default Map Center & Zoom Configuration
 
-Because the FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`), the Live Fleet Map defaults to those coordinates whenever no vehicle currently has a GPS fix.
+The map centre/zoom is now controlled by the embedded MeshSat map itself (the FMS no longer sets Leaflet defaults). The FMS fleet operates in Papua New Guinea (PNG / National Capital District / Port Moresby, approx `lat: -9.4438`, `lon: 147.1803`) — configure the MeshSat map's default view there if required.
 
 ---
 
