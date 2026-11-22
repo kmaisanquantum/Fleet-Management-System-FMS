@@ -12,7 +12,7 @@ console.log("Seeding Fleet Management System & Intelligence data...");
 // Wipe existing data for clean seed
 const tables = [
   "business_rules", "fleet_exceptions", "driver_events", "geofences", "gps_positions",
-  "gps_devices", "vehicle_fuel_logs", "fuel_cards", "fuel_stations",
+  "telemetry_records", "device_commands", "gps_devices", "vehicle_fuel_logs", "fuel_cards", "fuel_stations",
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
   "vehicle_allocations", "drivers", "vehicles", "audit_logs", "alerts",

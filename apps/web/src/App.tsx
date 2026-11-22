@@ -19,6 +19,7 @@ import VehicleInspections from "./pages/VehicleInspections";
 import VehicleMaintenance from "./pages/VehicleMaintenance";
 import TelemetryLive from "./pages/TelemetryLive";
 import TelemetryReport from "./pages/TelemetryReport";
+import DeviceTelemetry from "./pages/DeviceTelemetry";
 
 import Alerts from "./pages/Alerts";
 import AuditLog from "./pages/AuditLog";
@@ -73,6 +74,7 @@ function AppRoutes() {
 
         {/* Client-facing telemetry views (available to all roles, scoped server-side) */}
         <Route path="/telemetry" element={<TelemetryLive />} />
+        <Route path="/telemetry/device/:imei" element={<DeviceTelemetry />} />
         <Route path="/telemetry-report" element={<TelemetryReport />} />
 
         {/* Internal staff area */}

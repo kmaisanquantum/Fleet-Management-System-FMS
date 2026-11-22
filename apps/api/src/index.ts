@@ -28,6 +28,7 @@ import fleetAnalyticsRoutes from "./routes/fleetAnalytics";
 
 import gpsRoutes from "./routes/gps";
 import telemetryRoutes from "./routes/telemetry";
+import deviceCommandsRoutes from "./routes/deviceCommands";
 import fuelTransactionsRoutes from "./routes/fuelTransactions";
 import fleetOverviewRoutes from "./routes/fleetOverview";
 import exceptionsRoutes from "./routes/exceptions";
@@ -69,6 +70,9 @@ app.use("/api/v1/fleet-dashboard", fleetDashboardRoutes);
 app.use("/api/v1/fleet-analytics", fleetAnalyticsRoutes);
 
 app.use("/api/v1/gps", gpsRoutes);
+// Mounted before the telemetry router so /api/telemetry/commands is handled here
+// (the telemetry router applies requireAuth to everything after /ingest).
+app.use("/api/telemetry/commands", deviceCommandsRoutes);
 app.use("/api/telemetry", telemetryRoutes);
 app.use("/api/v1/fuel-transactions", fuelTransactionsRoutes);
 app.use("/api/v1/fleet", fleetOverviewRoutes);

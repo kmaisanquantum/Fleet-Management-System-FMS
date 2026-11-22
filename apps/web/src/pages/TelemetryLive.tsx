@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { telemetryApi, TelemetryLatest } from "../api/telemetry";
 import { useAuth } from "../context/AuthContext";
 
@@ -139,7 +140,13 @@ export default function TelemetryLive() {
 
               <div className="flex items-center justify-between text-[11px] text-ink-500 border-t border-base-700 pt-3">
                 <span className="font-mono">IMEI {v.imei || "—"}</span>
-                <span>{v.recorded_at ? new Date(v.recorded_at.replace(" ", "T") + "Z").toLocaleString() : "Never"}</span>
+                {v.imei ? (
+                  <Link to={`/telemetry/device/${v.imei}`} className="text-amber-400 hover:underline">
+                    Device panel &rarr;
+                  </Link>
+                ) : (
+                  <span>{v.recorded_at ? new Date(v.recorded_at.replace(" ", "T") + "Z").toLocaleString() : "Never"}</span>
+                )}
               </div>
             </div>
           ))}

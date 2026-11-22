@@ -1,5 +1,6 @@
+import crypto from "crypto";
 import dotenv from "dotenv";
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 
 dotenv.config();
@@ -7,6 +8,15 @@ dotenv.config();
 const PORT = Number(process.env.PORT) || 6055;
 const FMS_URL = (process.env.FMS_URL || "https://fleet.dspng.tech").replace(/\/$/, "");
 const FMS_API_KEY = process.env.FMS_API_KEY || "dev-telemetry-key-12345";
+/**
+ * Bearer token for the canonical FMS telemetry ingest endpoint
+ * (`POST /api/telemetry/ingest`). When set, telemetry is preferred to this
+ * endpoint; the legacy `/api/v1/gps/positions` (x-api-key) path is kept as a
+ * fallback so the relay works against either FMS deployment.
+ */
+const TELEMETRY_INGEST_TOKEN = process.env.TELEMETRY_INGEST_TOKEN || "";
+/** Shared secret accepted on `POST /api/cmd` (matches FMS `MESHSAT_CMD_TOKEN`). */
+const MESHSAT_CMD_TOKEN = process.env.MESHSAT_CMD_TOKEN || "";
 
 const app = express();
 app.use(cors());
@@ -24,9 +34,68 @@ app.get("/", (_req: Request, res: Response) => {
     endpoints: {
       health: "GET /health",
       webhook: "POST /webhook (aliases: /webhook/meshsat, /api/v1/telemetry)",
+      queueCommand: "POST /api/cmd (x-cmd-token) — queue a Codec-12 command for the tracker's next TCP session",
+      drainCommands: "GET /api/cmd/:imei (x-cmd-token) — pull (and clear) queued commands for a TCP session",
     },
-    targetFmsUrl: `${FMS_URL}/api/v1/gps/positions`,
+    targetFmsUrl: TELEMETRY_INGEST_TOKEN ? `${FMS_URL}/api/telemetry/ingest` : `${FMS_URL}/api/v1/gps/positions`,
   });
+});
+
+/* ------------------------------------------------------------------ *
+ * Remote command queue (/api/cmd)
+ *
+ * The FMS queues Codec-12 commands (setparam/setdigout) and hands them to
+ * this relay. Trackers connect over TCP 5027 and only accept data during a
+ * session, so commands are held in memory keyed by IMEI and drained when the
+ * tracker's next session starts (GET /api/cmd/:imei).
+ * ------------------------------------------------------------------ */
+
+interface QueuedCommand {
+  id: string;
+  imei: string;
+  command: unknown;
+  queuedAt: string;
+}
+
+const commandQueue = new Map<string, QueuedCommand[]>();
+
+/** Constant-time token check for the relay command endpoints. */
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function requireCmdToken(req: Request, res: Response, next: NextFunction) {
+  const auth = req.header("authorization");
+  const bearer = auth && auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const provided = req.header("x-cmd-token") || bearer || "";
+  if (!MESHSAT_CMD_TOKEN || !provided || !safeEqual(provided, MESHSAT_CMD_TOKEN)) {
+    return res.status(401).json({ error: "Unauthorized: valid command token required" });
+  }
+  next();
+}
+
+app.post("/api/cmd", requireCmdToken, (req: Request, res: Response) => {
+  const { imei, command } = req.body || {};
+  if (!imei || typeof imei !== "string" || !command) {
+    return res.status(400).json({ error: "Payload must include { imei, command }" });
+  }
+  const entry: QueuedCommand = { id: crypto.randomUUID(), imei, command, queuedAt: new Date().toISOString() };
+  const list = commandQueue.get(imei) ?? [];
+  list.push(entry);
+  commandQueue.set(imei, list);
+  console.log(`Queued command ${entry.id} for IMEI ${imei} (depth ${list.length}).`);
+  res.status(202).json({ status: "queued", id: entry.id, imei, queueDepth: list.length });
+});
+
+/** Drains (and clears) the queued commands for an IMEI — called on the next TCP session. */
+app.get("/api/cmd/:imei", requireCmdToken, (req: Request, res: Response) => {
+  const { imei } = req.params;
+  const list = commandQueue.get(imei) ?? [];
+  commandQueue.delete(imei);
+  res.json({ data: list });
 });
 
 interface NormalizedTelemetry {
@@ -163,6 +232,77 @@ function normalizeMeshSatPayload(body: any): NormalizedTelemetry | null {
   };
 }
 
+/** Converts the normalized `YYYY-MM-DD HH:MM:SS` timestamp to ISO-8601 (UTC). */
+function toIso(recordedAt?: string): string {
+  if (!recordedAt) return new Date().toISOString();
+  const d = new Date(recordedAt.replace(" ", "T") + "Z");
+  return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
+/**
+ * Forwards a normalized record to the canonical FMS telemetry ingest endpoint,
+ * falling back to the legacy x-api-key positions endpoint when no ingest token
+ * is configured or the ingest endpoint is unavailable.
+ */
+async function forwardToFms(normalized: NormalizedTelemetry): Promise<{ status: number; body: any; via: string }> {
+  if (TELEMETRY_INGEST_TOKEN) {
+    const ingestUrl = `${FMS_URL}/api/telemetry/ingest`;
+    console.log(`Forwarding telemetry for '${normalized.deviceIdentifier}' to ${ingestUrl}...`);
+    const res = await fetch(ingestUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${TELEMETRY_INGEST_TOKEN}`,
+      },
+      body: JSON.stringify({
+        imei: normalized.deviceIdentifier,
+        timestamp: toIso(normalized.recordedAt),
+        lat: normalized.lat,
+        lon: normalized.lon,
+        sats: normalized.satellites ?? null,
+        speed_kmh: normalized.speed ?? null,
+        heading: normalized.heading ?? null,
+        odometer: normalized.odometer ?? null,
+        ignition: normalized.ignition ?? (normalized.speed && normalized.speed > 0 ? 1 : 0),
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok || (res.status !== 404 && res.status !== 401)) {
+      return { status: res.status, body, via: "ingest" };
+    }
+    console.warn(`Ingest endpoint returned HTTP ${res.status}; falling back to legacy positions endpoint.`);
+  }
+
+  const legacyUrl = `${FMS_URL}/api/v1/gps/positions`;
+  console.log(`Forwarding telemetry for '${normalized.deviceIdentifier}' to ${legacyUrl}...`);
+  const res = await fetch(legacyUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": FMS_API_KEY,
+    },
+    body: JSON.stringify({
+      deviceIdentifier: normalized.deviceIdentifier,
+      lat: normalized.lat,
+      lon: normalized.lon,
+      altitude: normalized.altitude,
+      battery: normalized.battery,
+      speed: normalized.speed,
+      heading: normalized.heading,
+      satellites: normalized.satellites,
+      // Prefer the Teltonika ignition IO element; fall back to deriving it from speed.
+      ignition: normalized.ignition ?? (normalized.speed && normalized.speed > 0 ? 1 : 0),
+      odometer: normalized.odometer,
+      fuelLevelPct: normalized.fuelLevelPct,
+      gsmSignal: normalized.gsmSignal,
+      source: "meshsat",
+      recordedAt: normalized.recordedAt,
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status, body, via: "positions" };
+}
+
 /**
  * POST /webhook or POST /webhook/meshsat
  * MeshSat Gateway Webhook Listener
@@ -180,51 +320,25 @@ app.post(["/webhook", "/webhook/meshsat", "/api/v1/telemetry"], async (req: Requ
       });
     }
 
-    const targetEndpoint = `${FMS_URL}/api/v1/gps/positions`;
-    console.log(`Forwarding MeshSat telemetry for '${normalized.deviceIdentifier}' to ${targetEndpoint}...`);
+    const { status, body, via } = await forwardToFms(normalized);
 
-    const fmsResponse = await fetch(targetEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": FMS_API_KEY,
-      },
-      body: JSON.stringify({
-        deviceIdentifier: normalized.deviceIdentifier,
-        lat: normalized.lat,
-        lon: normalized.lon,
-        altitude: normalized.altitude,
-        battery: normalized.battery,
-        speed: normalized.speed,
-        heading: normalized.heading,
-        satellites: normalized.satellites,
-        // Prefer the Teltonika ignition IO element; fall back to deriving it from speed.
-        ignition: normalized.ignition ?? (normalized.speed && normalized.speed > 0 ? 1 : 0),
-        odometer: normalized.odometer,
-        fuelLevelPct: normalized.fuelLevelPct,
-        gsmSignal: normalized.gsmSignal,
-        source: "meshsat",
-        recordedAt: normalized.recordedAt,
-      }),
-    });
-
-    const responseData = await fmsResponse.json().catch(() => ({}));
-
-    if (!fmsResponse.ok) {
-      console.error(`FMS returned HTTP ${fmsResponse.status}:`, responseData);
-      return res.status(fmsResponse.status).json({
+    if (status >= 400) {
+      console.error(`FMS (${via}) returned HTTP ${status}:`, body);
+      return res.status(status).json({
         error: "FMS ingest rejected payload",
-        fmsStatus: fmsResponse.status,
-        fmsResponse: responseData,
+        via,
+        fmsStatus: status,
+        fmsResponse: body,
       });
     }
 
-    console.log(`Successfully forwarded telemetry for '${normalized.deviceIdentifier}' to FMS.`);
+    console.log(`Successfully forwarded telemetry for '${normalized.deviceIdentifier}' to FMS via ${via}.`);
     res.status(200).json({
       status: "success",
       message: "Telemetry forwarded to FMS",
+      via,
       normalized,
-      fmsResponse: responseData,
+      fmsResponse: body,
     });
   } catch (error: any) {
     console.error("Relay forwarding error:", error.message || error);
@@ -235,7 +349,17 @@ app.post(["/webhook", "/webhook/meshsat", "/api/v1/telemetry"], async (req: Requ
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`MeshSat Telemetry Relay listening on port ${PORT}`);
-  console.log(`Configured target FMS URL: ${FMS_URL}/api/v1/gps/positions`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`MeshSat Telemetry Relay listening on port ${PORT}`);
+    console.log(
+      `Telemetry target: ${
+        TELEMETRY_INGEST_TOKEN ? `${FMS_URL}/api/telemetry/ingest (Bearer)` : `${FMS_URL}/api/v1/gps/positions (x-api-key)`
+      }`
+    );
+    console.log(`Command queue endpoint: POST /api/cmd (token ${MESHSAT_CMD_TOKEN ? "configured" : "NOT configured"})`);
+  });
+}
+
+export { app, normalizeMeshSatPayload, forwardToFms, commandQueue };
+export type { NormalizedTelemetry };

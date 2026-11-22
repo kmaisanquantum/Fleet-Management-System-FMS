@@ -18,6 +18,17 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json();
 }
 
+async function postJson<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${TELEMETRY_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ error: res.statusText }));
+  if (!res.ok) throw new Error(data.error || "Request failed");
+  return data as T;
+}
+
 export interface TelemetryLatest {
   vehicle_id: string;
   vehicle_number: string;
@@ -100,4 +111,77 @@ export const telemetryApi = {
     }
     return res.blob();
   },
+
+  /** Decoded IO feature grid + recent telemetry events for a device. */
+  features: (imei: string) => getJson<{ data: DeviceFeatures }>(`/features/${encodeURIComponent(imei)}`),
+
+  commands: {
+    issue: (body: { imei: string; type: "setparam" | "setdigout" | "raw"; params?: Record<string, string | number | boolean> }) =>
+      postJson<{ data: DeviceCommand; message: string }>("/commands", body),
+    list: (imei?: string) =>
+      getJson<{ data: DeviceCommand[] }>(`/commands${imei ? `?imei=${encodeURIComponent(imei)}` : ""}`),
+    cancel: (id: string) => postJson<{ data: DeviceCommand; message: string }>(`/commands/${id}/cancel`),
+  },
 };
+
+export interface IoFeature {
+  io_id: number;
+  feature_key: string;
+  label: string;
+  value_type: string;
+  value: number | null;
+}
+
+export interface DeviceEvent {
+  id: string;
+  created_at: string;
+  severity: "critical" | "warning" | "info";
+  category: string;
+  type: string | null;
+  rule_code: string;
+  description: string;
+  status: string;
+}
+
+export interface DeviceFeatures {
+  imei: string;
+  vehicle_id: string;
+  client_id: string | null;
+  vehicle_number: string | null;
+  registration_number: string | null;
+  live: {
+    recorded_at: string;
+    lat: number | null;
+    lon: number | null;
+    sats: number | null;
+    speed_kmh: number | null;
+    ignition: number | null;
+    fuel_liters: number | null;
+  } | null;
+  features: IoFeature[];
+  events: DeviceEvent[];
+}
+
+export type CommandStatus = "queued" | "sent" | "acked" | "failed";
+
+export interface DeviceCommand {
+  id: string;
+  imei: string;
+  vehicle_id: string | null;
+  command_type: "setparam" | "setdigout" | "raw";
+  payload_json: string;
+  status: CommandStatus;
+  requested_by: string | null;
+  created_at: string;
+  sent_at: string | null;
+  response_text: string | null;
+  vehicle_number?: string | null;
+  client_id?: string | null;
+}
+
+export interface ParamMapRow {
+  id: string;
+  feature_key: string;
+  param_id: number;
+  description: string | null;
+}

@@ -110,10 +110,84 @@ function migrateExistingDatabase() {
     }
   } catch (e) {}
 
+  // Rich telemetry + device-command + configurable IO/param tables (created
+  // here so they exist on databases that predate migration 005).
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS telemetry_records (
+    id TEXT PRIMARY KEY,
+    imei TEXT NOT NULL,
+    vehicle_id TEXT REFERENCES vehicles(id),
+    recorded_at TEXT NOT NULL,
+    lat REAL,
+    lon REAL,
+    sats INTEGER,
+    speed_kmh REAL,
+    ignition INTEGER,
+    fuel_liters REAL,
+    io_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (imei, recorded_at)
+  );`);
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS device_commands (
+    id TEXT PRIMARY KEY,
+    imei TEXT NOT NULL,
+    vehicle_id TEXT REFERENCES vehicles(id),
+    command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'raw')),
+    payload_json TEXT,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+    requested_by TEXT REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT,
+    response_text TEXT
+  );`);
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS io_feature_map (
+    id TEXT PRIMARY KEY,
+    io_id INTEGER NOT NULL,
+    feature_key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    value_type TEXT NOT NULL DEFAULT 'event' CHECK (value_type IN ('event', 'scalar', 'boolean')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (io_id, feature_key)
+  );`);
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS param_map (
+    id TEXT PRIMARY KEY,
+    feature_key TEXT NOT NULL,
+    param_id INTEGER NOT NULL,
+    description TEXT,
+    UNIQUE (feature_key, param_id)
+  );`);
+
+  // Reference defaults for the IO feature map and Teltonika parameter map.
+  // INSERT OR IGNORE keeps operator edits intact across restarts.
+  runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type) VALUES
+    ('iof-fuel-counter-12', 12,  'fuel_counter_12',   'GNSS Fuel Counter (primary)',      'scalar'),
+    ('iof-fuel-counter-13', 13,  'fuel_counter_13',   'GNSS Fuel Counter (secondary)',    'scalar'),
+    ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event'),
+    ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event'),
+    ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event'),
+    ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event'),
+    ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event'),
+    ('iof-towing',          246, 'towing',            'Towing Detected',                  'event'),
+    ('iof-crash',           247, 'crash',             'Crash Detection',                  'event'),
+    ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event'),
+    ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event'),
+    ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean'),
+    ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean'),
+    ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event'),
+    ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar');`);
+  runIgnoreErrors(`INSERT OR IGNORE INTO param_map (id, feature_key, param_id, description) VALUES
+    ('pm-overspeed-threshold', 'overspeed_threshold',   1580, 'Overspeeding threshold (km/h)'),
+    ('pm-idling-timeout',      'idling_timeout',        1581, 'Excessive idling timeout (seconds)'),
+    ('pm-eco-driving',         'eco_driving_threshold', 1582, 'Eco (green) driving sensitivity'),
+    ('pm-geofence-radius',     'geofence_radius',       2051, 'Auto geofence radius (metres)'),
+    ('pm-immobilizer-dout',    'immobilizer_dout',      1028, 'DOUT1 / immobiliser control');`);
+
   // Indexes that reference the columns added above (created here so they work
   // on databases that predate those columns).
   runIgnoreErrors("CREATE UNIQUE INDEX IF NOT EXISTS uq_gps_positions_imei_time ON gps_positions(imei, recorded_at) WHERE imei IS NOT NULL;");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_positions_imei ON gps_positions(imei, recorded_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_vehicle ON telemetry_records(vehicle_id, recorded_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei, recorded_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_vehicles_client ON vehicles(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_devices_client ON gps_devices(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);");

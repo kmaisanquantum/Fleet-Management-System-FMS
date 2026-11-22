@@ -297,6 +297,45 @@ describe("Telemetry router", () => {
     expect(client.text).not.toContain(`TEL-VB`);
   });
 
+  /* ------------------- device features + records ------------------- */
+
+  it("writes an idempotent telemetry_records row on ingest", async () => {
+    const row = db.prepare("SELECT * FROM telemetry_records WHERE imei = ? AND recorded_at = ?").get(imeiA, "2026-03-28 11:00:00") as any;
+    expect(row).toBeDefined();
+    expect(row.vehicle_id).toBe(vehicleAId);
+    // Re-sending the same fix does not create a second telemetry_records row
+    const before = (db.prepare("SELECT COUNT(*) AS n FROM telemetry_records WHERE imei = ?").get(imeiA) as any).n;
+    await post("/ingest", validPayload(imeiA, "2026-03-28T11:00:00Z"), INGEST_TOKEN);
+    const after = (db.prepare("SELECT COUNT(*) AS n FROM telemetry_records WHERE imei = ?").get(imeiA) as any).n;
+    expect(after).toBe(before);
+  });
+
+  it("decodes IO features and recent events for a device", async () => {
+    const { status, body } = await get(`/features/${imeiA}`, adminToken);
+    expect(status).toBe(200);
+    expect(body.data.imei).toBe(imeiA);
+    expect(body.data.vehicle_id).toBe(vehicleAId);
+    expect(body.data.live).toBeTruthy();
+    // The IO feature list is decoded through the configurable io_feature_map
+    expect(Array.isArray(body.data.features)).toBe(true);
+    expect(body.data.features.length).toBeGreaterThan(0);
+    const fuelFeature = body.data.features.find((f: any) => f.io_id === 12);
+    expect(fuelFeature).toBeDefined();
+    expect(fuelFeature.value).toBe(8421);
+    // Recent telemetry events are included
+    expect(body.data.events.some((e: any) => e.rule_code === "RULE_OVERSPEED")).toBe(true);
+  });
+
+  it("returns 404 for features of an unbound or unknown device", async () => {
+    expect((await get(`/features/${unboundImei}`, adminToken)).status).toBe(404);
+    expect((await get("/features/000000000000000", adminToken)).status).toBe(404);
+  });
+
+  it("forbids a client user from reading another client's device features", async () => {
+    const { status } = await get(`/features/${imeiB}`, clientAToken);
+    expect(status).toBe(403);
+  });
+
   /* ------------------------ pure logic ---------------------- */
 
   it("maps truthy IO elements to alert rules with telemetry types", () => {

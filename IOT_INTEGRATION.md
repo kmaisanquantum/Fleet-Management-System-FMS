@@ -66,3 +66,54 @@ See `MESHSAT_INTEGRATION.md` section 8 for the full endpoint contract, IO
 mapping table, and device-registration steps, and `API.md` for the
 client-scoped read/report endpoints (`/api/telemetry/latest`,
 `/summary`, `/export`).
+
+### IO-ID → feature map (`io_feature_map`)
+
+The device's raw IO element map is decoded through a configurable
+`io_feature_map` (admin-editable via `GET/POST/PUT/DELETE /api/v1/settings/io-features`,
+surface in the Settings page). Defaults seeded on first run:
+
+| IO ID | Feature key | Label | Type |
+|---|---|---|---|
+| 12 | `fuel_counter_12` | GNSS Fuel Counter (primary) | scalar |
+| 13 | `fuel_counter_13` | GNSS Fuel Counter (secondary) | scalar |
+| 255 | `overspeed` | Overspeeding | event |
+| 253 | `eco_accel` | Eco Driving — Harsh Acceleration | event |
+| 254 | `eco_brake` | Eco Driving — Harsh Braking | event |
+| 251 | `idling` | Excessive Idling | event |
+| 252 | `power_unplug` | Power Unplug / Tamper | event |
+| 246 | `towing` | Towing Detected | event |
+| 247 | `crash` | Crash Detection | event |
+| 175 | `geofence_auto` | Auto / Manual Geofence | event |
+| 174 | `geofence_zone` | Geofence Zone Event (IO 155–174) | event |
+| 179 | `immobilizer` | DOUT1 / Immobilizer | boolean |
+| 179 | `dout_ignition` | DOUT Driven by Ignition | boolean |
+| 249 | `jamming` | Network Jamming | event |
+| 78 | `ibutton` | iButton / Driver ID Read | scalar |
+
+`GET /api/telemetry/features/:imei` returns each feature with its latest decoded
+value alongside recent telemetry events. Because the mapping lives in the
+database, changing the FMB125 Configurator IO assignment (or adding a new
+element) needs no code change — add/edit the row instead.
+
+### Parameter-ID map (`param_map`)
+
+Remote `setparam` commands reference a Teltonika parameter ID resolved through
+the configurable `param_map` (admin-editable via `/api/v1/settings/param-map`).
+Defaults seeded on first run:
+
+| Feature key | Param ID | Description |
+|---|---|---|
+| `overspeed_threshold` | 1580 | Overspeeding threshold (km/h) |
+| `idling_timeout` | 1581 | Excessive idling timeout (seconds) |
+| `eco_driving_threshold` | 1582 | Eco (green) driving sensitivity |
+| `geofence_radius` | 2051 | Auto geofence radius (metres) |
+| `immobilizer_dout` | 1028 | DOUT1 / immobiliser control |
+
+### Remote configuration & control (Codec 12)
+
+Users with an elevated role (`admin`, `fleet_admin`, `fleet_manager`) can push
+Codec-12 commands (`setparam`, `setdigout`, `raw`) to a tracker through
+`POST /api/telemetry/commands`. Commands are queued in `device_commands` and
+forwarded to the MeshSat relay for delivery over the tracker's next TCP session.
+See `MESHSAT_INTEGRATION.md` section 9 for the command flow.

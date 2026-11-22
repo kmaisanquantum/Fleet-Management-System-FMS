@@ -224,6 +224,25 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
       return res.status(200).json({ duplicate: true, message: "Duplicate telemetry record ignored", imei: input.imei, recordedAt });
     }
 
+    // Canonical rich telemetry record, idempotent on (imei, recorded_at).
+    db.prepare(`
+      INSERT OR IGNORE INTO telemetry_records (
+        id, imei, vehicle_id, recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters, io_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uuid(),
+      input.imei,
+      vehicleId,
+      recordedAt,
+      input.lat,
+      input.lon,
+      input.sats ?? null,
+      input.speed_kmh ?? null,
+      ignitionValue(input),
+      fuelLiters,
+      Object.keys(io).length ? JSON.stringify(io) : null
+    );
+
     // Update vehicle live-state cache
     db.prepare(`
       UPDATE vehicles
@@ -306,6 +325,32 @@ function clientClause(scopes: string[] | null, alias = "v"): { sql: string; para
   return { sql: ` AND ${alias}.client_id IN (${scopes.map(() => "?").join(", ")})`, params: scopes };
 }
 
+export interface IoFeatureRow {
+  io_id: number;
+  feature_key: string;
+  label: string;
+  value_type: string;
+  enabled: number;
+}
+
+/** Loads the enabled IO-ID -> feature mapping (configurable via the settings API). */
+export function loadIoFeatureMap(): IoFeatureRow[] {
+  return db
+    .prepare("SELECT io_id, feature_key, label, value_type, enabled FROM io_feature_map WHERE enabled = 1 ORDER BY io_id ASC")
+    .all() as IoFeatureRow[];
+}
+
+/** Decodes a raw Teltonika IO payload into the configured feature list. */
+export function decodeIoFeatures(io: Record<string, number>, map: IoFeatureRow[] = loadIoFeatureMap()) {
+  return map.map((f) => ({
+    io_id: f.io_id,
+    feature_key: f.feature_key,
+    label: f.label,
+    value_type: f.value_type,
+    value: io[String(f.io_id)] ?? null,
+  }));
+}
+
 /**
  * GET /api/telemetry/latest
  * Latest position, ignition, speed, satellites and fuel for each vehicle the
@@ -353,6 +398,78 @@ router.get("/latest", (req, res, next) => {
     `).all(...params);
 
     res.json({ data: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/telemetry/features/:imei
+ * Decodes the device's latest raw IO payload through the configurable
+ * `io_feature_map` and returns the feature list plus recent telemetry events.
+ */
+router.get("/features/:imei", (req, res, next) => {
+  try {
+    const scope = resolveClientScopes(req.user);
+    const imei = req.params.imei;
+
+    const device = db
+      .prepare("SELECT id, vehicle_id, client_id FROM gps_devices WHERE device_identifier = ?")
+      .get(imei) as { id: string; vehicle_id: string | null; client_id: string | null } | undefined;
+    if (!device?.vehicle_id) {
+      return res.status(404).json({ error: "Unknown or unbound device", details: `No vehicle bound to IMEI '${imei}'` });
+    }
+    if (scope && (!device.client_id || !scope.includes(device.client_id))) {
+      return res.status(403).json({ error: "Forbidden: device is outside your client scope" });
+    }
+
+    const vehicle = db
+      .prepare("SELECT vehicle_number, registration_number FROM vehicles WHERE id = ?")
+      .get(device.vehicle_id) as { vehicle_number: string; registration_number: string } | undefined;
+
+    const latest = db
+      .prepare(`
+        SELECT recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters, io_json
+        FROM telemetry_records WHERE imei = ? ORDER BY recorded_at DESC LIMIT 1
+      `)
+      .get(imei) as any;
+
+    let io: Record<string, number> = {};
+    if (latest?.io_json) {
+      try { io = JSON.parse(latest.io_json); } catch {}
+    }
+
+    const events = db
+      .prepare(`
+        SELECT id, created_at, severity, category, type, rule_code, description, status
+        FROM fleet_exceptions
+        WHERE vehicle_id = ? AND source = 'telemetry'
+        ORDER BY created_at DESC LIMIT 20
+      `)
+      .all(device.vehicle_id);
+
+    res.json({
+      data: {
+        imei,
+        vehicle_id: device.vehicle_id,
+        client_id: device.client_id,
+        vehicle_number: vehicle?.vehicle_number ?? null,
+        registration_number: vehicle?.registration_number ?? null,
+        live: latest
+          ? {
+              recorded_at: latest.recorded_at,
+              lat: latest.lat,
+              lon: latest.lon,
+              sats: latest.sats,
+              speed_kmh: latest.speed_kmh,
+              ignition: latest.ignition,
+              fuel_liters: latest.fuel_liters,
+            }
+          : null,
+        features: decodeIoFeatures(io),
+        events,
+      },
+    });
   } catch (e) {
     next(e);
   }

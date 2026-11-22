@@ -123,6 +123,14 @@ The `services/meshsat-relay` microservice runs alongside the FMS stack, receives
    ```env
    # Shared with the api service (x-api-key) and the relay (FMS_API_KEY)
    TELEMETRY_API_KEY=<openssl rand -hex 32 output>
+
+   # Preferred rich ingest (relay → POST /api/telemetry/ingest as Bearer).
+   # Must match on api + relay.
+   TELEMETRY_INGEST_TOKEN=<openssl rand -hex 32 output>
+
+   # Remote command queue shared secret (api → relay POST /api/cmd).
+   # Must match on api + relay.
+   MESHSAT_CMD_TOKEN=<openssl rand -hex 32 output>
    ```
 
 2. **Run with Docker Compose** (from the repository root, so the relay joins the same network as `api`):
@@ -143,6 +151,8 @@ The `services/meshsat-relay` microservice runs alongside the FMS stack, receives
        PORT: 6055
        FMS_URL: http://api:4000
        FMS_API_KEY: ${TELEMETRY_API_KEY}
+       TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
+       MESHSAT_CMD_TOKEN: ${MESHSAT_CMD_TOKEN}
      depends_on:
        - api
    ```
@@ -173,7 +183,7 @@ The `services/meshsat-relay` microservice runs alongside the FMS stack, receives
 
 ## 5. Supported Device Payload Formats
 
-The relay accepts webhooks on `POST /webhook` (aliases: `/webhook/meshsat`, `/api/v1/telemetry`) and auto-detects the payload shape, so a single webhook target can serve both Meshtastic/MeshSat nodes and Teltonika FMB125 trackers. It normalizes each payload into the standard FMS GPS position body and forwards it to `POST {FMS_URL}/api/v1/gps/positions`.
+The relay accepts webhooks on `POST /webhook` (aliases: `/webhook/meshsat`, `/api/v1/telemetry`) and auto-detects the payload shape, so a single webhook target can serve both Meshtastic/MeshSat nodes and Teltonika FMB125 trackers. It normalizes each payload and forwards it to FMS using the **preferred Bearer ingest** `POST {FMS_URL}/api/telemetry/ingest` (`Authorization: Bearer $TELEMETRY_INGEST_TOKEN`) when that token is configured, **falling back** to the legacy `POST {FMS_URL}/api/v1/gps/positions` (`x-api-key: $FMS_API_KEY`) if the rich ingest endpoint returns `404`/`401` — so older deployments keep working unchanged.
 
 ### 5.1 Meshtastic / MeshSat
 
@@ -399,10 +409,11 @@ These are JWT-authenticated and scoped so that client-portal users (`client_user
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/telemetry/latest` | Latest position, ignition, speed, satellites and fuel per vehicle. |
+| GET | `/api/telemetry/features/:imei` | Decoded IO feature grid (via `io_feature_map`) + live state + recent telemetry events for one device. 403 outside the caller's client scope. |
 | GET | `/api/telemetry/summary?from&to` | Fuel refuelled/consumed, distance, efficiency and the alert log over a range. |
 | GET | `/api/telemetry/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). |
 
-In the web app these power **Vehicle Live Status** (`/telemetry`) and **Fuel & Alerts Report** (`/telemetry-report`), which includes the CSV export button and a printable view.
+In the web app these power **Vehicle Live Status** (`/telemetry`), the **Device panel** (`/telemetry/device/:imei` — live status, IO feature grid, fuel refuel/drain events with CSV/print, recent events, and the command section), and the **Fuel & Alerts Report** (`/telemetry-report`), which includes the CSV export button and a printable view.
 
 ### 8.5 Verification
 
@@ -424,3 +435,71 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/ingest \
 ```
 
 A `201` with `alerts >= 1` confirms the record was stored and the overspeed IO element raised an exception; re-sending the identical body returns `200 { "duplicate": true }`.
+
+---
+
+## 9. Remote Configuration & Control (Teltonika Codec 12)
+
+FMS users with an elevated role can push remote config/control commands (`setparam`, `setdigout`, `raw`) to a tracker. Commands are **queued** in `device_commands` and handed to the MeshSat relay, which delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+
+### 9.1 Command flow
+
+```
+   Web UI (device panel)
+        │  POST /api/telemetry/commands  {imei, type, params}
+        │  JWT: admin | fleet_admin | fleet_manager   (client_user = 403)
+        ▼
+   FMS api  ──► device_commands row (status = 'queued')  +  audit_logs
+        │  POST ${MESHSAT_CMD_URL}/api/cmd   {imei, command}
+        │  x-cmd-token: ${MESHSAT_CMD_TOKEN}
+        ▼
+   MeshSat relay (127.0.0.1:6051 local / meshsat.dspng.space public)
+        │  enqueue per-IMEI; deliver on the tracker's next TCP session
+        ▼
+   FMB125 tracker  ──(Codec 12 over TCP 5027)──►  applies setparam / setdigout
+        │
+        ▼  (relay accepts → FMS api marks the row 'sent' / 'acked')
+```
+
+Status transitions: `queued` → `sent` → `acked`, or `failed` (relay rejected / cancelled). If the relay is **unreachable** the row stays `queued` for a later retry.
+
+### 9.2 Endpoints
+
+The relay exposes a command-queue endpoint authenticated by the shared secret (accepted as either `x-cmd-token: <MESHSAT_CMD_TOKEN>` or `Authorization: Bearer <MESHSAT_CMD_TOKEN>`):
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/cmd` | `{ imei, command }` — queue a Codec-12 command for the tracker's next TCP session. Returns `202 { status: 'queued', id, imei, queueDepth }`. |
+| GET | `/api/cmd/:imei` | Drain and return the pending queue for an IMEI (used by the TCP session handler). |
+
+The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/telemetry/commands`):
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/` | Queue a command (see `API.md`). Forwarded to `${MESHSAT_CMD_URL}/api/cmd` with `x-cmd-token`. |
+| GET | `/?imei=` | Tenant-scoped queue + delivery history. |
+| POST | `/:id/cancel` | Cancel a still-`queued` row. |
+
+### 9.3 Environment variables
+
+| Variable | Where | Purpose |
+|---|---|---|
+| `MESHSAT_CMD_URL` | api | Relay base URL (e.g. `https://meshsat.dspng.space`). |
+| `MESHSAT_CMD_TOKEN` | api + relay | Shared secret: api sends `x-cmd-token`, relay validates it. |
+| `TELEMETRY_INGEST_TOKEN` | api + relay | Bearer token for the rich telemetry ingest (also used by the relay forward). |
+
+### 9.4 Verification
+
+```bash
+# Queue an immobilizer DOUT engagement (replace <JWT> with a fleet_manager token)
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 } }'
+
+# Inspect the queue + status history
+curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \
+  -H "Authorization: Bearer <JWT>"
+```
+
+A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (relay accepted) or `queued` (relay unreachable) confirms the command was persisted and forwarded.
