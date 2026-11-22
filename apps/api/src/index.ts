@@ -29,6 +29,7 @@ import fleetAnalyticsRoutes from "./routes/fleetAnalytics";
 import gpsRoutes from "./routes/gps";
 import telemetryRoutes from "./routes/telemetry";
 import meshsatRoutes from "./routes/meshsat";
+import meshsatMapRoutes from "./routes/meshsatMap";
 import deviceCommandsRoutes from "./routes/deviceCommands";
 import fuelTransactionsRoutes from "./routes/fuelTransactions";
 import fleetOverviewRoutes from "./routes/fleetOverview";
@@ -77,6 +78,9 @@ app.use("/api/telemetry/commands", deviceCommandsRoutes);
 app.use("/api/telemetry", telemetryRoutes);
 // Hands the SPA a tokenized MeshSat map URL (secret injected server-side).
 app.use("/api/meshsat", meshsatRoutes);
+// Server-side proxy for the Basic-auth-protected MeshSat map (credential injected
+// here so the browser iframe never sees the password wall).
+app.use("/api/meshsat-map", meshsatMapRoutes);
 app.use("/api/v1/fuel-transactions", fuelTransactionsRoutes);
 app.use("/api/v1/fleet", fleetOverviewRoutes);
 app.use("/api/v1/fleet", utilisationRoutes);

@@ -322,38 +322,41 @@ Upon sending test packets, verify that a `gps_positions` row is created and the 
 
 ---
 
-## 7. Live Fleet Map — MeshSat Map Integration (server-injected token)
+## 7. Live Fleet Map — MeshSat Map Integration (server-side Basic-auth proxy)
 
-The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) embeds the MeshSat map UI as a single full-size `<iframe>`; the native FMS Leaflet/telematics map and its search/filter/refresh controls have been removed. The MeshSat endpoint is **password-protected**, so embedding it directly would only show the login wall. Instead the shared secret is injected server-side:
+The Live Fleet Map page (`apps/web/src/pages/LiveFleetMap.tsx`) embeds the MeshSat map UI as a single full-size `<iframe>`; the native FMS Leaflet/telematics map and its search/filter/refresh controls have been removed. `meshsat.dspng.space` is protected by **HTTP Basic auth** (username `admin` + password), and **a browser cannot send a Basic `Authorization` header from inside an iframe** — embedding the map directly would only show the login wall. Instead the FMS backend proxies the map and injects the credential server-side.
 
 **Trust flow**
 
-1. The browser (a logged-in FMS user) calls `GET /api/meshsat/map-url` with its FMS JWT (`Authorization: Bearer`). The endpoint is **behind FMS auth** and returns `{ "url": "<map origin>/map?key=<MESHSAT_MAP_TOKEN>" }`.
-2. The page sets the iframe `src` to that URL. The shared secret (`MESHSAT_MAP_TOKEN`) is injected **server-side** and is never baked into the frontend env or bundle.
-3. MeshSat validates the `key` token on `/map` **and** on the data endpoint the map polls, skipping the interactive password for valid requests.
-4. If the endpoint is unreachable (network error, expired JWT), the page falls back to the plain map URL (`VITE_MESHSAT_MAP_URL` or `https://meshsat.dspng.space/map`) and shows a notice — that path may hit the password wall. When `MESHSAT_MAP_TOKEN` is **not** configured, the endpoint simply returns the plain `<map origin>/map` URL (without `?key=`).
+1. The browser loads the iframe at `/api/meshsat-map/map` — **same-origin** with the FMS, so it carries the FMS session. Because an iframe cannot set an `Authorization` header, the page passes the FMS JWT as `?fms_token=<jwt>` (`LiveFleetMap.tsx` reads it from `localStorage`).
+2. `/api/meshsat-map/*` is **behind FMS auth**. The proxy accepts the FMS JWT as a `Bearer` header, as the `?fms_token=` query parameter, or as the short-lived `fms_map_token` cookie it sets on the first query-param hit — so the map's own data-endpoint polls stay authenticated without the token riding on every request.
+3. The proxy fetches `${MESHSAT_MAP_ORIGIN || "https://meshsat.dspng.space"}/<path>` — e.g. `/api/meshsat-map/map` → `/map`, `/api/meshsat-map/api/positions` → `/api/positions` — injecting `Authorization: Basic <base64(MESHSAT_MAP_AUTH)>` **server-side**. The password never reaches the browser.
+4. In `text/html` responses the proxy rewrites absolute `https://meshsat.dspng.space` URLs and root-relative `src="/"`, `href="/"`, `fetch("/"`, `url(/` references to the `/api/meshsat-map` prefix, so the map's assets and data calls flow back through the proxy. It also strips `X-Frame-Options` and the CSP `frame-ancestors` directive so the iframe renders.
+5. MeshSat validates the Basic credential on `/map` **and** on the data endpoint the map polls, because the proxy attaches it to every upstream request.
 
-### 7.1 VPS-side requirement (outside this repository)
+**Known limitation — WebSockets / SSE.** An HTTP proxy can only rewrite request URLs the page issues through the document (fetch/XHR/assets). If the map's inline script opens a **WebSocket** or **EventSource** against an *absolute* URL (`wss://meshsat.dspng.space/...` / `https://meshsat.dspng.space/...`), that connection bypasses the proxy and will fail the Basic-auth challenge. If live telemetry on the map depends on such a channel, use the token-param alternative in §7.1 instead.
 
-> **The token is only as trustworthy as the MeshSat side validating it.** The MeshSat VPS (`meshsat.dspng.space`) must be updated to:
-> * accept the shared-secret token as the `key` query parameter on `GET /map`;
-> * accept the same token on the map's data endpoint (the one the embedded page polls) and keep it authorized across the map's own polling requests;
-> * reject requests with a missing or invalid `key` (unless authenticated interactively).
->
-> This validation lives on the VPS and is **not part of this repository**.
+**Framing.** The proxy strips the framing headers itself, so MeshSat does **not** need to change its `X-Frame-Options`/CSP for the iframe to render (it must still be served over HTTPS).
 
-A stronger alternative (if the VPS prefers not to place the raw secret in the URL) is an HMAC-signed token: the FMS would send `?exp=<unix>&sig=<hmac-sha256(exp, MESHSAT_MAP_TOKEN)>` and the VPS would verify `sig` and the expiry instead of comparing a static `key`.
+### 7.1 Alternative — MeshSat accepts a token param
 
-**Framing.** For the iframe to render, MeshSat must be served over **HTTPS** and must permit framing by the dashboard origin: it must **not** send `X-Frame-Options: DENY`/`SAMEORIGIN`, and its `Content-Security-Policy` `frame-ancestors` must include `https://fleet.dspng.tech`.
+If the map's inline script uses absolute-URL API calls or WebSockets that cannot be rewritten (see the known limitation above), the VPS can instead accept a bearer-style token parameter:
+
+* The MeshSat VPS accepts `?key=<token>` on `GET /map` **and** on the data endpoint the map polls, skipping the interactive password for a valid token.
+* The FMS then hands the browser a ready-to-embed tokenized URL — implemented as `GET /api/meshsat/map-url` (behind FMS auth), backed by `MESHSAT_MAP_TOKEN`.
+* A stronger variant is an HMAC-signed token: the FMS sends `?exp=<unix>&sig=<hmac-sha256(exp, MESHSAT_MAP_TOKEN)>` and the VPS verifies `sig` and the expiry instead of comparing a static key.
+
+> **The credential/token is only as trustworthy as the MeshSat side validating it.** Either way the MeshSat VPS must reject `/map` (and its data endpoint) when the credential is missing or wrong. That validation lives on the VPS and is **not part of this repository**.
 
 ### 7.2 Environment variables
 
 | Variable | Where | Purpose |
 |---|---|---|
 | `MESHSAT_MAP_ORIGIN` | api | MeshSat map origin (default `https://meshsat.dspng.space`). |
-| `MESHSAT_MAP_TOKEN` | api | Shared secret appended to the map URL as `?key=`. Set in **Coolify**; do not commit. |
+| `MESHSAT_MAP_AUTH` | api | HTTP Basic credential (`username:password`, e.g. `admin:<password>`) the proxy injects upstream on every request. Set in **Coolify**; do not commit. |
+| `MESHSAT_MAP_TOKEN` | api | Shared secret for the §7.1 token-param **alternative** only (used by `GET /api/meshsat/map-url`). Optional. |
 
-`VITE_MESHSAT_MAP_URL` (web, see `apps/web/.env.example`) is only a fallback used when `/api/meshsat/map-url` is unavailable.
+On the web side, `VITE_MESHSAT_MAP_URL` (`apps/web/.env.example`) is the override for **unauthenticated** MeshSat deployments: when set, the page embeds it directly instead of routing through `/api/meshsat-map`. When unset, the page uses the proxy.
 
 MeshSat GPS packets posted by the gateway to the telemetry relay in `services/meshsat-relay` are still ingested into the FMS (`POST /api/telemetry/ingest`, sections 8–9) and surface as live markers inside the embedded MeshSat map.
 
