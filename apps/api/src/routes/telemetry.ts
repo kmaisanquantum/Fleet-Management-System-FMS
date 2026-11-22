@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { z } from "zod";
 import { db } from "../db";
 import { requireAuth, requireIngestToken } from "../middleware/auth";
-import { resolveClientScope } from "../utils/scope";
+import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
 
 const router = Router();
@@ -17,6 +17,8 @@ export const FUEL_DELTA_THRESHOLD_L = 5;
 
 export interface IoAlertRule {
   ioId: number;
+  /** Telemetry alert type stored on the alert row. */
+  type: string;
   ruleCode: string;
   severity: "critical" | "warning" | "info";
   category: string;
@@ -28,15 +30,15 @@ export interface IoAlertRule {
  * value is truthy. IO ids per the Teltonika FMB125 AVL parameter list.
  */
 export const IO_ALERT_RULES: IoAlertRule[] = [
-  { ioId: 255, ruleCode: "RULE_OVERSPEED", severity: "warning", category: "telemetry", label: "Overspeed" },
-  { ioId: 251, ruleCode: "RULE_EXCESSIVE_IDLING", severity: "warning", category: "telemetry", label: "Excessive idling" },
-  { ioId: 252, ruleCode: "RULE_DEVICE_UNPLUG", severity: "critical", category: "security", label: "Device unplug / tamper" },
-  { ioId: 246, ruleCode: "RULE_TOWING_DETECTED", severity: "critical", category: "security", label: "Towing detected" },
-  { ioId: 247, ruleCode: "RULE_CRASH_DETECTED", severity: "critical", category: "driver", label: "Crash detected" },
-  { ioId: 175, ruleCode: "RULE_GEOFENCE_IO", severity: "warning", category: "geofence", label: "Geofence event" },
-  { ioId: 179, ruleCode: "RULE_IMMOBILIZER", severity: "warning", category: "security", label: "Immobilizer / DOUT" },
-  { ioId: 253, ruleCode: "RULE_ECO_DRIVING", severity: "info", category: "driver", label: "Eco driving (harsh acceleration)" },
-  { ioId: 254, ruleCode: "RULE_ECO_DRIVING", severity: "info", category: "driver", label: "Eco driving (harsh braking)" },
+  { ioId: 255, type: "overspeed", ruleCode: "RULE_OVERSPEED", severity: "warning", category: "telemetry", label: "Overspeed" },
+  { ioId: 251, type: "idling", ruleCode: "RULE_EXCESSIVE_IDLING", severity: "warning", category: "telemetry", label: "Excessive idling" },
+  { ioId: 252, type: "power_unplug", ruleCode: "RULE_DEVICE_UNPLUG", severity: "critical", category: "security", label: "Device unplug / tamper" },
+  { ioId: 246, type: "towing", ruleCode: "RULE_TOWING_DETECTED", severity: "critical", category: "security", label: "Towing detected" },
+  { ioId: 247, type: "crash", ruleCode: "RULE_CRASH_DETECTED", severity: "critical", category: "driver", label: "Crash detected" },
+  { ioId: 175, type: "geofence_entry", ruleCode: "RULE_GEOFENCE_IO", severity: "warning", category: "geofence", label: "Geofence event" },
+  { ioId: 179, type: "immobilizer", ruleCode: "RULE_IMMOBILIZER", severity: "warning", category: "security", label: "Immobilizer / DOUT" },
+  { ioId: 253, type: "eco_driving", ruleCode: "RULE_ECO_DRIVING", severity: "info", category: "driver", label: "Eco driving (harsh acceleration)" },
+  { ioId: 254, type: "eco_driving", ruleCode: "RULE_ECO_DRIVING", severity: "info", category: "driver", label: "Eco driving (harsh braking)" },
 ];
 
 /** Geofence zone IO ids in the 155–174 block are reported as zone events. */
@@ -47,9 +49,11 @@ const GEOFENCE_ZONE_IO_MAX = 174;
 const IO_ODOMETER = [16];
 const IO_IGNITION = [239];
 const IO_GSM = [21];
+/** IO 12/13 are the Teltonika fuel counter elements (raw, stored in io_json). */
 const IO_FUEL_COUNTER = [12, 13];
 
 export interface InterpretedAlert {
+  type: string;
   ruleCode: string;
   severity: "critical" | "warning" | "info";
   category: string;
@@ -68,8 +72,8 @@ function ioValue(io: Record<string, number>, ids: number[]): number | undefined 
 
 /**
  * Maps truthy FMB125 IO elements to fleet-exception alert specs. Scalar
- * telemetry IO (fuel counter, odometer, GSM) is captured on the position row
- * instead of producing an alert.
+ * telemetry IO (fuel counter 12/13, odometer 16, GSM 21) is captured on the
+ * position row instead of producing an alert.
  */
 export function interpretIoAlerts(io: Record<string, number> = {}): InterpretedAlert[] {
   const alerts: InterpretedAlert[] = [];
@@ -78,6 +82,7 @@ export function interpretIoAlerts(io: Record<string, number> = {}): InterpretedA
     const value = io[String(rule.ioId)];
     if (value === undefined || value === null || !Number(value)) continue;
     alerts.push({
+      type: rule.type,
       ruleCode: rule.ruleCode,
       severity: rule.severity,
       category: rule.category,
@@ -91,6 +96,7 @@ export function interpretIoAlerts(io: Record<string, number> = {}): InterpretedA
     const value = io[String(id)];
     if (value === undefined || value === null || !Number(value)) continue;
     alerts.push({
+      type: "geofence_entry",
       ruleCode: "RULE_GEOFENCE_ZONE",
       severity: "warning",
       category: "geofence",
@@ -187,6 +193,9 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     const odometer = input.odometer ?? ioValue(io, IO_ODOMETER) ?? 0;
     const gsmSignal = ioValue(io, IO_GSM) ?? null;
     const fuelLiters = input.fuel_liters ?? null;
+    // IO 12/13 are the Teltonika fuel counters; keep the raw value alongside
+    // io_json for diagnostics while refuel/drain is derived from fuel_liters.
+    const fuelCounter = ioValue(io, IO_FUEL_COUNTER) ?? null;
     const posId = uuid();
 
     const insert = db.prepare(`
@@ -245,9 +254,9 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
       `).get(vehicleId, recordedAt) as { fuel_liters: number } | undefined;
       const kind = detectFuelDelta(prev?.fuel_liters ?? null, fuelLiters);
       if (kind === "refuel") {
-        fuelDeltaAlert = { ruleCode: "RULE_REFUEL_DETECTED", severity: "info", category: "fuel", description: `Refuel detected: fuel level rose from ${prev?.fuel_liters}L to ${fuelLiters}L.` };
+        fuelDeltaAlert = { type: "refuel", ruleCode: "RULE_REFUEL_DETECTED", severity: "info", category: "fuel", description: `Refuel detected: fuel level rose from ${prev?.fuel_liters}L to ${fuelLiters}L.` };
       } else if (kind === "drain") {
-        fuelDeltaAlert = { ruleCode: "RULE_FUEL_DRAIN", severity: "warning", category: "fuel", description: `Possible fuel drain: fuel level fell from ${prev?.fuel_liters}L to ${fuelLiters}L.` };
+        fuelDeltaAlert = { type: "fuel_drain", ruleCode: "RULE_FUEL_DRAIN", severity: "warning", category: "fuel", description: `Possible fuel drain: fuel level fell from ${prev?.fuel_liters}L to ${fuelLiters}L.` };
       }
     }
     if (fuelDeltaAlert) alerts.push(fuelDeltaAlert);
@@ -255,11 +264,11 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     // Persist alert rows (fast, one prepared insert per alert)
     const insertException = db.prepare(`
       INSERT INTO fleet_exceptions (
-        id, severity, category, rule_code, vehicle_id, driver_id, gps_position_id, description, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+        id, severity, category, type, source, rule_code, vehicle_id, driver_id, gps_position_id, description, status, created_at
+      ) VALUES (?, ?, ?, ?, 'telemetry', ?, ?, ?, ?, ?, 'open', ?)
     `);
     for (const alert of alerts) {
-      insertException.run(uuid(), alert.severity, alert.category, alert.ruleCode, vehicleId, driverId, posId, alert.description, recordedAt);
+      insertException.run(uuid(), alert.severity, alert.category, alert.type, alert.ruleCode, vehicleId, driverId, posId, alert.description, recordedAt);
     }
 
     // Safety-relevant IO events also feed driver-intelligence scoring
@@ -279,7 +288,7 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     }
 
     const position = db.prepare("SELECT * FROM gps_positions WHERE id = ?").get(posId);
-    return res.status(201).json({ data: position, alerts: alerts.length, message: "Telemetry ingested" });
+    return res.status(201).json({ data: position, alerts: alerts.length, fuelCounter, message: "Telemetry ingested" });
   } catch (e) {
     next(e);
   }
@@ -291,10 +300,10 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
 
 router.use(requireAuth);
 
-/** Builds a `AND <alias>.client_id = ?` clause fragment when scoped. */
-function clientClause(scope: string | null, alias = "v"): { sql: string; params: any[] } {
-  if (!scope) return { sql: "", params: [] };
-  return { sql: ` AND ${alias}.client_id = ?`, params: [scope] };
+/** Builds an `AND <alias>.client_id IN (...)` clause fragment when scoped. */
+function clientClause(scopes: string[] | null, alias = "v"): { sql: string; params: any[] } {
+  if (!scopes || scopes.length === 0) return { sql: "", params: [] };
+  return { sql: ` AND ${alias}.client_id IN (${scopes.map(() => "?").join(", ")})`, params: scopes };
 }
 
 /**
@@ -304,7 +313,7 @@ function clientClause(scope: string | null, alias = "v"): { sql: string; params:
  */
 router.get("/latest", (req, res, next) => {
   try {
-    const scope = resolveClientScope(req.user);
+    const scope = resolveClientScopes(req.user);
     const { sql: clause, params } = clientClause(scope);
     const rows = db.prepare(`
       SELECT
@@ -355,7 +364,7 @@ router.get("/latest", (req, res, next) => {
  */
 router.get("/summary", (req, res, next) => {
   try {
-    const scope = resolveClientScope(req.user);
+    const scope = resolveClientScopes(req.user);
     const { sql: clause, params } = clientClause(scope);
     const from = (req.query.from as string) || "1970-01-01 00:00:00";
     const to = (req.query.to as string) || "2999-12-31 23:59:59";
@@ -464,7 +473,7 @@ function csvEscape(value: unknown): string {
  */
 router.get("/export", (req, res, next) => {
   try {
-    const scope = resolveClientScope(req.user);
+    const scope = resolveClientScopes(req.user);
     const { sql: clause, params } = clientClause(scope);
     const from = (req.query.from as string) || "1970-01-01 00:00:00";
     const to = (req.query.to as string) || "2999-12-31 23:59:59";

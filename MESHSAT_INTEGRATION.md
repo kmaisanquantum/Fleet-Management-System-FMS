@@ -371,30 +371,30 @@ For FMB125 trackers that forward JSON telemetry directly (e.g. the gateway at `m
 
 ### 8.3 IO element → alert mapping
 
-Truthy event-style IO elements are interpreted into `fleet_exceptions` rows; scalar telemetry IO (ignition, odometer, GSM, fuel counter) is stored on the position/live-state instead.
+Truthy event-style IO elements are interpreted into `fleet_exceptions` rows; scalar telemetry IO (ignition, odometer, GSM, fuel counter) is stored on the position/live-state instead. Each telemetry-derived row carries a `type` (the alert type) and `source = 'telemetry'`.
 
-| IO id | Meaning | Result |
-|---|---|---|
-| 255 | Overspeed | `RULE_OVERSPEED` (warning, telemetry) + driver `speeding` event |
-| 251 | Excessive idling | `RULE_EXCESSIVE_IDLING` (warning, telemetry) |
-| 252 | Device unplug / tamper | `RULE_DEVICE_UNPLUG` (critical, security) |
-| 246 | Towing detected | `RULE_TOWING_DETECTED` (critical, security) |
-| 247 | Crash detection | `RULE_CRASH_DETECTED` (critical, driver) + driver `crash` event |
-| 175 | Geofence event | `RULE_GEOFENCE_IO` (warning, geofence) |
-| 155–174 | Geofence zone N | `RULE_GEOFENCE_ZONE` (warning, geofence) |
-| 179 | Digital output / immobilizer (DOUT) | `RULE_IMMOBILIZER` (warning, security) |
-| 253 | Eco driving — harsh acceleration | `RULE_ECO_DRIVING` (info, driver) |
-| 254 | Eco driving — harsh braking | `RULE_ECO_DRIVING` (info, driver) |
-| 239 | Ignition | Position/live-state `ignition` |
-| 16 | Total odometer | Position/live-state `odometer` |
-| 21 | GSM signal | Position/live-state `gsm_signal` |
-| 12 / 13 | Fuel counter / fuel used | Consumed (informational) |
+| IO id | Meaning | `type` | Result |
+|---|---|---|---|
+| 255 | Overspeed | `overspeed` | `RULE_OVERSPEED` (warning, telemetry) + driver `speeding` event |
+| 251 | Excessive idling | `idling` | `RULE_EXCESSIVE_IDLING` (warning, telemetry) |
+| 252 | Device unplug / tamper | `power_unplug` | `RULE_DEVICE_UNPLUG` (critical, security) |
+| 246 | Towing detected | `towing` | `RULE_TOWING_DETECTED` (critical, security) |
+| 247 | Crash detection | `crash` | `RULE_CRASH_DETECTED` (critical, driver) + driver `crash` event |
+| 175 | Geofence event | `geofence_entry` | `RULE_GEOFENCE_IO` (warning, geofence) |
+| 155–174 | Geofence zone N | `geofence_entry` | `RULE_GEOFENCE_ZONE` (warning, geofence) |
+| 179 | Digital output / immobilizer (DOUT) | `immobilizer` | `RULE_IMMOBILIZER` (warning, security) |
+| 253 | Eco driving — harsh acceleration | `eco_driving` | `RULE_ECO_DRIVING` (info, driver) |
+| 254 | Eco driving — harsh braking | `eco_driving` | `RULE_ECO_DRIVING` (info, driver) |
+| 239 | Ignition | — | Position/live-state `ignition` |
+| 16 | Total odometer | — | Position/live-state `odometer` |
+| 21 | GSM signal | — | Position/live-state `gsm_signal` |
+| 12 / 13 | Fuel counter / fuel used | — | Stored raw in `io_json` (also returned as `fuelCounter` on ingest) |
 
-**Refuel / drain.** A change in absolute `fuel_liters` of at least **5 L** since the previous fix raises `RULE_REFUEL_DETECTED` (info, fuel) or `RULE_FUEL_DRAIN` (warning, fuel).
+**Refuel / drain.** A change in absolute `fuel_liters` of at least **5 L** since the previous fix raises `RULE_REFUEL_DETECTED` (`type = refuel`, info, fuel) or `RULE_FUEL_DRAIN` (`type = fuel_drain`, warning, fuel).
 
 ### 8.4 Client-facing read & reporting endpoints
 
-These are JWT-authenticated and scoped so that client-portal users (`client_user` role, carrying a `client_id`) only see their own vehicles:
+These are JWT-authenticated and scoped so that client-portal users (`client_user` role, mapped to a client through the `user_clients` table) only see their own vehicles (filtered by `vehicles.client_id`). Fleet-wide roles see everything.
 
 | Method | Path | Notes |
 |---|---|---|

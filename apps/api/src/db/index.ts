@@ -80,10 +80,35 @@ function migrateExistingDatabase() {
   addColumn("vehicles", "current_fuel_level_pct", "REAL");
   addColumn("vehicles", "current_engine_hours", "REAL");
 
-  // Client (tenant) scoping — added after the initial release
-  addColumn("users", "client_id", "TEXT REFERENCES clients(id)");
+  // Client (tenant) scoping — vehicles/devices carry the tenant id; users are
+  // mapped to clients through the user_clients join table.
   addColumn("vehicles", "client_id", "TEXT REFERENCES clients(id)");
   addColumn("gps_devices", "client_id", "TEXT REFERENCES clients(id)");
+
+  // Typed, source-tagged alerts (telemetry events: overspeed, geofence_entry/
+  // exit, idling, power_unplug, towing, crash, refuel, fuel_drain).
+  addColumn("fleet_exceptions", "type", "TEXT");
+  addColumn("fleet_exceptions", "source", "TEXT");
+  addColumn("alerts", "type", "TEXT");
+  addColumn("alerts", "source", "TEXT");
+
+  // user_clients join table (created here so it exists on databases that
+  // predate migration 004), then backfilled from the legacy users.client_id
+  // column when present.
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS user_clients (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    client_id TEXT NOT NULL REFERENCES clients(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, client_id)
+  );`);
+  try {
+    const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+    if (userCols.some((c) => c.name === "client_id")) {
+      runIgnoreErrors(
+        "INSERT OR IGNORE INTO user_clients (user_id, client_id) SELECT id, client_id FROM users WHERE client_id IS NOT NULL;"
+      );
+    }
+  } catch (e) {}
 
   // Indexes that reference the columns added above (created here so they work
   // on databases that predate those columns).
@@ -91,6 +116,8 @@ function migrateExistingDatabase() {
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_positions_imei ON gps_positions(imei, recorded_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_vehicles_client ON vehicles(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_devices_client ON gps_devices(client_id);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_fleet_exceptions_type ON fleet_exceptions(type);");
 
   // CHECK constraints that gained new allowed values require a table rebuild
   // in SQLite. Rebuild only when the new value is missing from the old DDL.
@@ -122,6 +149,8 @@ function migrateExistingDatabase() {
       transaction_id TEXT REFERENCES vehicle_fuel_logs(id),
       gps_position_id TEXT REFERENCES gps_positions(id),
       description TEXT NOT NULL,
+      type TEXT,
+      source TEXT,
       status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'investigating', 'resolved', 'dismissed')),
       notes TEXT,
       resolution TEXT,

@@ -7,7 +7,8 @@ export interface AuthUser {
   email: string;
   roleName: string;
   airportId: string | null;
-  clientId: string | null;
+  /** Clients this user may see (via user_clients); empty for fleet-wide users. */
+  clientIds: string[];
 }
 
 declare global {

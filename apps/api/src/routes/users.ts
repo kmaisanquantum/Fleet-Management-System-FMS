@@ -31,6 +31,8 @@ const schema = z.object({
   fullName: z.string().min(2),
   roleId: z.string(),
   airportId: z.string().optional(),
+  /** Clients this user may see (mapped via user_clients); omit for fleet-wide. */
+  clientIds: z.array(z.string()).optional(),
 });
 
 router.post("/", (req, res, next) => {
@@ -50,6 +52,9 @@ router.post("/", (req, res, next) => {
       airportId: input.airportId ?? null,
       createdBy: req.user!.id,
     });
+    for (const clientId of input.clientIds ?? []) {
+      db.prepare(`INSERT OR IGNORE INTO user_clients (user_id, client_id) VALUES (?, ?)`).run(id, clientId);
+    }
     writeAudit({
       userId: req.user!.id,
       action: "USER_CREATED",

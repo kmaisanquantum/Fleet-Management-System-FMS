@@ -64,7 +64,7 @@ export default function TelemetryLive() {
           <h1 className="text-2xl font-bold text-ink-100">Vehicle Live Status</h1>
           <p className="text-sm text-ink-400">
             Live telemetry — position, ignition, speed, satellites and fuel level
-            {user?.clientId ? " for your fleet" : ""}
+            {user?.clientIds?.length ? " for your fleet" : ""}
           </p>
         </div>
         <div className="flex items-center gap-3">

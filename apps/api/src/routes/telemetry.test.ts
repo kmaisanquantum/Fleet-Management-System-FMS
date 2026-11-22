@@ -10,7 +10,7 @@ import telemetryRouter, {
   detectFuelDelta,
   normalizeTimestamp,
 } from "./telemetry";
-import { resolveClientScope } from "../utils/scope";
+import { resolveClientScopes } from "../utils/scope";
 
 /**
  * Telemetry ingest + read API tests.
@@ -127,11 +127,13 @@ describe("Telemetry router", () => {
     const clientUserId = uuid();
     db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', 'T Admin', ?, 'active')")
       .run(adminId, `tel_admin_${s}@dspng.tech`, adminRow.id);
-    db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, client_id, status) VALUES (?, ?, 'hash', 'T Client A', ?, ?, 'active')")
-      .run(clientUserId, `tel_client_${s}@dspng.tech`, clientRow.id, clientAId);
+    db.prepare("INSERT INTO users (id, email, password_hash, full_name, role_id, status) VALUES (?, ?, 'hash', 'T Client A', ?, 'active')")
+      .run(clientUserId, `tel_client_${s}@dspng.tech`, clientRow.id);
+    // Client-role user -> client A via the user_clients join table
+    db.prepare("INSERT INTO user_clients (user_id, client_id) VALUES (?, ?)").run(clientUserId, clientAId);
 
-    adminUser = { id: adminId, email: "admin@test", roleName: "admin", airportId: null, clientId: clientAId };
-    clientAUser = { id: clientUserId, email: "client@test", roleName: "client_user", airportId: null, clientId: clientAId };
+    adminUser = { id: adminId, email: "admin@test", roleName: "admin", airportId: null, clientIds: [clientAId] };
+    clientAUser = { id: clientUserId, email: "client@test", roleName: "client_user", airportId: null, clientIds: [clientAId] };
     adminToken = signAccessToken(adminUser);
     clientAToken = signAccessToken(clientAUser);
 
@@ -215,9 +217,23 @@ describe("Telemetry router", () => {
     expect(vehicle.current_longitude).toBeCloseTo(147.1803);
     expect(vehicle.current_fuel_level_pct).toBeCloseTo((62.5 / 80) * 100);
 
-    // IO 255 (overspeed) must have raised a fleet exception
+    // IO 255 (overspeed) must have raised a typed, source-tagged fleet exception
     const exc = db.prepare("SELECT * FROM fleet_exceptions WHERE rule_code = 'RULE_OVERSPEED' AND vehicle_id = ?").get(vehicleAId) as any;
     expect(exc).toBeDefined();
+    expect(exc.type).toBe("overspeed");
+    expect(exc.source).toBe("telemetry");
+  });
+
+  it("keeps the raw IO 12/13 fuel counter alongside the position", async () => {
+    const { status, body } = await post(
+      "/ingest",
+      { ...validPayload(imeiA, "2026-03-28T11:30:00Z"), io: { "12": 8421, "239": 1 } },
+      INGEST_TOKEN
+    );
+    expect(status).toBe(201);
+    expect(body.fuelCounter).toBe(8421);
+    const row = db.prepare("SELECT io_json FROM gps_positions WHERE imei = ? AND recorded_at = ?").get(imeiA, "2026-03-28 11:30:00") as any;
+    expect(row.io_json).toContain("8421");
   });
 
   it("ignores a duplicate record and reports it (idempotent)", async () => {
@@ -283,15 +299,20 @@ describe("Telemetry router", () => {
 
   /* ------------------------ pure logic ---------------------- */
 
-  it("maps truthy IO elements to alert rules", () => {
-    const alerts = interpretIoAlerts({ "255": 1, "252": 1, "247": 1 });
+  it("maps truthy IO elements to alert rules with telemetry types", () => {
+    const alerts = interpretIoAlerts({ "255": 1, "252": 1, "247": 1, "175": 1 });
     const rules = alerts.map((a) => a.ruleCode);
     expect(rules).toContain("RULE_OVERSPEED");
     expect(rules).toContain("RULE_DEVICE_UNPLUG");
     expect(rules).toContain("RULE_CRASH_DETECTED");
+    expect(alerts.find((a) => a.ruleCode === "RULE_OVERSPEED")?.type).toBe("overspeed");
+    expect(alerts.find((a) => a.ruleCode === "RULE_DEVICE_UNPLUG")?.type).toBe("power_unplug");
+    expect(alerts.find((a) => a.ruleCode === "RULE_GEOFENCE_IO")?.type).toBe("geofence_entry");
     // Falsy / absent IO produces no alerts
     expect(interpretIoAlerts({ "255": 0 })).toHaveLength(0);
     expect(interpretIoAlerts({})).toHaveLength(0);
+    // Scalar fuel-counter IO (12/13) never produces an alert
+    expect(interpretIoAlerts({ "12": 8421, "13": 900 })).toHaveLength(0);
   });
 
   it("classifies fuel deltas above the threshold", () => {
@@ -307,10 +328,14 @@ describe("Telemetry router", () => {
     expect(ingestSchema.safeParse({ imei: "", timestamp: "x", lat: 0, lon: 0 }).success).toBe(false);
   });
 
-  it("resolveClientScope gives fleet roles full visibility and restricts client users", () => {
-    expect(resolveClientScope(adminUser)).toBeNull();
-    expect(resolveClientScope({ ...clientAUser, roleName: "fleet_manager" })).toBeNull();
-    expect(resolveClientScope(clientAUser)).toBe(clientAId);
-    expect(resolveClientScope(null)).toBeNull();
+  it("resolveClientScopes gives fleet roles full visibility and restricts client users", () => {
+    expect(resolveClientScopes(adminUser)).toBeNull();
+    expect(resolveClientScopes({ ...clientAUser, roleName: "fleet_manager" })).toBeNull();
+    expect(resolveClientScopes(clientAUser)).toEqual([clientAId]);
+    // A user mapped to two clients is scoped to both
+    expect(resolveClientScopes({ ...clientAUser, clientIds: [clientAId, clientBId] })).toEqual([clientAId, clientBId]);
+    // No client mapping -> unrestricted
+    expect(resolveClientScopes({ ...clientAUser, clientIds: [] })).toBeNull();
+    expect(resolveClientScopes(null)).toBeNull();
   });
 });

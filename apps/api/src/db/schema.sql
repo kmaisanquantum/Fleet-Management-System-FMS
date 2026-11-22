@@ -35,12 +35,20 @@ CREATE TABLE IF NOT EXISTS users (
   full_name TEXT NOT NULL,
   role_id TEXT NOT NULL REFERENCES roles(id),
   airport_id TEXT,
-  client_id TEXT REFERENCES clients(id),
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by TEXT,
   updated_by TEXT
+);
+
+-- Which client(s) a user may see. Client-role users are scoped through this
+-- join table (user_clients -> vehicles.client_id); fleet-wide roles see all.
+CREATE TABLE IF NOT EXISTS user_clients (
+  user_id TEXT NOT NULL REFERENCES users(id),
+  client_id TEXT NOT NULL REFERENCES clients(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, client_id)
 );
 
 CREATE TABLE IF NOT EXISTS business_rules (
@@ -61,6 +69,8 @@ CREATE TABLE IF NOT EXISTS alerts (
   asset_id TEXT,
   category TEXT NOT NULL,
   description TEXT NOT NULL,
+  type TEXT,
+  source TEXT,
   status TEXT NOT NULL DEFAULT 'open',
   assigned_to TEXT REFERENCES users(id),
   resolution TEXT,
@@ -271,6 +281,8 @@ CREATE TABLE IF NOT EXISTS fleet_exceptions (
   transaction_id TEXT REFERENCES vehicle_fuel_logs(id),
   gps_position_id TEXT REFERENCES gps_positions(id),
   description TEXT NOT NULL,
+  type TEXT,
+  source TEXT,
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'investigating', 'resolved', 'dismissed')),
   notes TEXT,
   resolution TEXT,
@@ -397,3 +409,4 @@ CREATE INDEX IF NOT EXISTS idx_fuel_logs_vehicle ON vehicle_fuel_logs(vehicle_id
 CREATE INDEX IF NOT EXISTS idx_trips_vehicle ON vehicle_trips(vehicle_id);
 CREATE INDEX IF NOT EXISTS idx_gps_positions_vehicle ON gps_positions(vehicle_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_exceptions_status ON fleet_exceptions(status, severity);
+CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);

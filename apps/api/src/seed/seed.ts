@@ -16,7 +16,7 @@ const tables = [
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
   "vehicle_allocations", "drivers", "vehicles", "audit_logs", "alerts",
-  "users", "clients", "role_permissions", "permissions", "roles"
+  "user_clients", "users", "clients", "role_permissions", "permissions", "roles"
 ];
 
 for (const t of tables) {
@@ -59,9 +59,12 @@ const passwordHash = bcrypt.hashSync("Admin@2026", 10);
 function makeUser(email: string, fullName: string, role: string, clientId: string | null = null) {
   const id = uuid();
   db.prepare(`
-    INSERT INTO users (id, email, password_hash, full_name, role_id, client_id, status)
-    VALUES (?, ?, ?, ?, ?, ?, 'active')
-  `).run(id, email, passwordHash, fullName, roleIds[role], clientId);
+    INSERT INTO users (id, email, password_hash, full_name, role_id, status)
+    VALUES (?, ?, ?, ?, ?, 'active')
+  `).run(id, email, passwordHash, fullName, roleIds[role]);
+  if (clientId) {
+    db.prepare(`INSERT INTO user_clients (user_id, client_id) VALUES (?, ?)`).run(id, clientId);
+  }
   return id;
 }
 

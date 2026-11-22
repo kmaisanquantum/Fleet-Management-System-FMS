@@ -34,12 +34,12 @@ Mounted **outside** the `/api/v1` prefix. Used by the MeshSat gateway relay for 
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/ingest` | Ingest one normalized FMB125 record. Auth: `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>` (timing-safe compare). Body: `{ imei, timestamp (ISO-8601), lat, lon, sats, speed_kmh, ignition, fuel_liters, io }`. Resolves the vehicle via `gps_devices.device_identifier = imei` (404 unknown, 400 unbound). Idempotent on `(imei, recorded_at)` → `201` on insert, `200 { duplicate: true }` on duplicate. Interprets IO elements into `fleet_exceptions` alert rows (overspeed 255, idling 251, unplug 252, towing 246, crash 247, geofence 175 / 155–174, immobilizer/DOUT 179, eco driving 253/254) and detects refuel/drain from fuel-level deltas. |
+| POST | `/ingest` | Ingest one normalized FMB125 record. Auth: `Authorization: Bearer <TELEMETRY_INGEST_TOKEN>` (timing-safe compare). Body: `{ imei, timestamp (ISO-8601), lat, lon, sats, speed_kmh, ignition, fuel_liters, io }`. Resolves the vehicle via `gps_devices.device_identifier = imei` (404 unknown, 400 unbound). Idempotent on `(imei, recorded_at)` → `201` on insert, `200 { duplicate: true }` on duplicate. Interprets IO elements into `fleet_exceptions` alert rows (overspeed 255, idling 251, unplug 252, towing 246, crash 247, geofence 175 / 155–174, immobilizer/DOUT 179, eco driving 253/254) — each row tagged with `type` and `source='telemetry'`; fuel counter IO 12/13 is stored raw in `io_json` and echoed as `fuelCounter`; refuel/drain is detected from fuel-level deltas. |
 | GET | `/latest` | Per-vehicle latest position, ignition, speed, satellites and fuel. Client-scoped. |
 | GET | `/summary?from&to` | Fuel consumption (refuelled/consumed), distance, per-vehicle efficiency and the alert/event log over a range. Client-scoped. |
 | GET | `/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). Client-scoped. |
 
-Client scoping: fleet/national roles (`admin`, `fleet_admin`, `fleet_manager`, `national_fuel_manager`, `executive`, `auditor`, `finance_officer`, `procurement_officer`) see all clients; a user carrying a `client_id` (e.g. the `client_user` role) sees only its own vehicles.
+Client scoping: fleet/national roles (`admin`, `fleet_admin`, `fleet_manager`, `national_fuel_manager`, `executive`, `auditor`, `finance_officer`, `procurement_officer`) see all clients; a user mapped to one or more clients through the `user_clients` table (e.g. the `client_user` role) sees only vehicles whose `client_id` is in that mapping.
 
 ## Fuel Transactions — `/api/v1/fuel-transactions`
 
