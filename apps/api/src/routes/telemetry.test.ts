@@ -411,6 +411,134 @@ describe("Telemetry router", () => {
     expect(status).toBe(403);
   });
 
+  /* ------------------ ingest normalization ------------------ */
+
+  it("normalizes FMB125 IO 66/67/16/240/78 onto the telemetry record", async () => {
+    const { status } = await post(
+      "/ingest",
+      {
+        ...validPayload(imeiA, "2026-03-28T15:00:00Z"),
+        // No explicit fuel_liters/odometer: the scaled IO values must drive them.
+        odometer: undefined,
+        io: { "255": 0, "12": 51300, "16": 123456, "66": 12400, "67": 4100, "239": 1, "240": 1, "78": 98765 },
+      },
+      INGEST_TOKEN
+    );
+    expect(status).toBe(201);
+
+    const row = db.prepare("SELECT * FROM telemetry_records WHERE imei = ? AND recorded_at = ?").get(imeiA, "2026-03-28 15:00:00") as any;
+    expect(row.ext_voltage_v).toBeCloseTo(12.4, 3);
+    expect(row.int_battery_v).toBeCloseTo(4.1, 3);
+    expect(row.odometer_km).toBeCloseTo(123.456, 3);
+    expect(row.movement).toBe(1);
+    expect(row.driver_id).toBe("98765");
+    // The raw IO payload is preserved verbatim alongside the derived values.
+    expect(row.io_json).toContain("12400");
+
+    // The device features endpoint surfaces the same normalized live values.
+    const { body } = await get(`/features/${imeiA}`, adminToken);
+    expect(body.data.live.ext_voltage_v).toBeCloseTo(12.4, 3);
+    expect(body.data.live.int_battery_v).toBeCloseTo(4.1, 3);
+    expect(body.data.live.odometer_km).toBeCloseTo(123.456, 3);
+    expect(body.data.live.movement).toBe(1);
+    expect(body.data.live.driver_id).toBe("98765");
+  });
+
+  it("stores null (never a bogus 0) when a normalized IO element is absent", async () => {
+    const { status } = await post(
+      "/ingest",
+      { ...validPayload(imeiA, "2026-03-28T15:30:00Z"), odometer: null, io: { "239": 1 } },
+      INGEST_TOKEN
+    );
+    expect(status).toBe(201);
+    const row = db.prepare("SELECT * FROM telemetry_records WHERE imei = ? AND recorded_at = ?").get(imeiA, "2026-03-28 15:30:00") as any;
+    expect(row.ext_voltage_v).toBeNull();
+    expect(row.int_battery_v).toBeNull();
+    expect(row.odometer_km).toBeNull();
+    expect(row.movement).toBeNull();
+    expect(row.driver_id).toBeNull();
+  });
+
+  it("exposes the device profile (model + capabilities) on the features endpoint", async () => {
+    const caps = { has_fuel_rs232: true, has_can_j1939: false, has_ble_sensors: true, has_camera: true, dout_count: 2 };
+    db.prepare("UPDATE gps_devices SET device_model = 'FMB125', capabilities = ? WHERE device_identifier = ?")
+      .run(JSON.stringify(caps), imeiA);
+
+    const { status, body } = await get(`/features/${imeiA}`, adminToken);
+    expect(status).toBe(200);
+    expect(body.data.device_model).toBe("FMB125");
+    expect(body.data.capabilities).toMatchObject(caps);
+    expect(body.data.device_last_seen_at).toBeTruthy();
+  });
+
+  /* -------------------- media endpoints --------------------- */
+
+  const mediaPayload = (imei: string, capturedAt = "2026-03-28T15:00:00Z") => ({
+    imei,
+    trigger_type: "camreq",
+    camera_channel: 1,
+    media_type: "image/jpeg",
+    storage_url: "https://media.dspng.tech/veh-a/photo-1.jpg",
+    captured_at: capturedAt,
+    metadata: { source: "test" },
+  });
+
+  it("rejects a media POST without the ingest token", async () => {
+    const { status, body } = await post("/media", mediaPayload(imeiA));
+    expect(status).toBe(401);
+    expect(body.error).toMatch(/bearer/i);
+  });
+
+  it("rejects an invalid media payload", async () => {
+    const { status } = await post("/media", { imei: imeiA, trigger_type: "camreq" }, INGEST_TOKEN);
+    expect(status).toBe(400);
+
+    // Unparseable captured_at is rejected too.
+    const bad = await post("/media", { ...mediaPayload(imeiA), captured_at: "not-a-date" }, INGEST_TOKEN);
+    expect(bad.status).toBe(400);
+  });
+
+  it("returns 404 for media on an unregistered IMEI and 400 for an unbound device", async () => {
+    expect((await post("/media", mediaPayload("000000000000000"), INGEST_TOKEN)).status).toBe(404);
+    expect((await post("/media", mediaPayload(unboundImei), INGEST_TOKEN)).status).toBe(400);
+  });
+
+  it("records a media capture and resolves device -> vehicle/client", async () => {
+    const { status, body } = await post("/media", mediaPayload(imeiA, "2026-03-28T15:05:00Z"), INGEST_TOKEN);
+    expect(status).toBe(201);
+    expect(body.data.vehicle_id).toBe(vehicleAId);
+    expect(body.data.client_id).toBe(clientAId);
+    expect(body.data.trigger_type).toBe("camreq");
+    expect(body.data.camera_channel).toBe(1);
+    expect(body.data.media_type).toBe("image/jpeg");
+    expect(body.data.storage_url).toBe("https://media.dspng.tech/veh-a/photo-1.jpg");
+    expect(body.data.captured_at).toBe("2026-03-28 15:05:00");
+    expect(body.data.metadata_json).toContain("test");
+  });
+
+  it("scopes GET /media to the caller's client", async () => {
+    // A capture on client B's device (admin-scoped read below must see both).
+    await post("/media", { ...mediaPayload(imeiB, "2026-03-28T15:06:00Z"), storage_url: "https://media.dspng.tech/veh-b/photo-1.jpg" }, INGEST_TOKEN);
+
+    const client = await get("/media", clientAToken);
+    expect(client.status).toBe(200);
+    expect(client.body.data.length).toBeGreaterThan(0);
+    expect(client.body.data.every((m: any) => m.client_id === clientAId)).toBe(true);
+    expect(client.body.data.some((m: any) => m.vehicle_id === vehicleBId)).toBe(false);
+
+    // Filtering by client B's IMEI still returns nothing for client A.
+    const filtered = await get(`/media?imei=${imeiB}`, clientAToken);
+    expect(filtered.body.data.length).toBe(0);
+
+    const admin = await get("/media", adminToken);
+    expect(admin.body.data.some((m: any) => m.vehicle_id === vehicleAId)).toBe(true);
+    expect(admin.body.data.some((m: any) => m.vehicle_id === vehicleBId)).toBe(true);
+
+    // IMEI filter narrows to the requested device.
+    const byImei = await get(`/media?imei=${imeiA}`, adminToken);
+    expect(byImei.body.data.every((m: any) => m.vehicle_id === vehicleAId)).toBe(true);
+  });
+
   /* ------------------------ pure logic ---------------------- */
 
   it("maps truthy IO elements to alert rules with telemetry types", () => {

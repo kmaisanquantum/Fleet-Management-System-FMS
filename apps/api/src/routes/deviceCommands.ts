@@ -81,7 +81,7 @@ const COMMAND_ROLES = ["admin", "fleet_manager"];
  * Read-only status commands the FMB125 accepts. Only these exact strings may be
  * issued through the `diagnostic` type; arbitrary strings must go through `raw`.
  */
-const DIAGNOSTIC_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus"]);
+const DIAGNOSTIC_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus", "readio"]);
 
 /**
  * Speed above which an ignition cut (setdigout 1) is refused: immobilising a
@@ -92,7 +92,7 @@ export const IGNITION_CUT_SPEED_LIMIT_KMH = 10;
 
 const commandSchema = z.object({
   imei: z.string().min(1),
-  type: z.enum(["setparam", "setdigout", "diagnostic", "raw"]),
+  type: z.enum(["setparam", "setdigout", "diagnostic", "raw", "camreq"]),
   params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().default({}),
   /** Admin-only override of the moving-vehicle ignition-cut guard. */
   force: z.boolean().optional(),
@@ -118,10 +118,12 @@ export interface BuiltCommand {
  * Builds the concrete Codec-12 command from a validated request. `setparam`
  * requires a parameter resolvable through `param_map` (by `param_id` or
  * `feature_key`); `setdigout` requires a 0/1 DOUT state (with an optional
- * non-negative `timeout`); `diagnostic` requires a whitelisted status command.
+ * `dout_index`, defaulting to DOUT 1, and an optional non-negative `timeout`);
+ * `diagnostic` requires a whitelisted status command; `camreq` requests a
+ * camera snapshot (optional positive `channel`).
  */
 export function buildCommand(
-  type: "setparam" | "setdigout" | "diagnostic" | "raw",
+  type: "setparam" | "setdigout" | "diagnostic" | "raw" | "camreq",
   params: Record<string, string | number | boolean>
 ): BuiltCommand {
   if (type === "setparam") {
@@ -141,8 +143,14 @@ export function buildCommand(
     const dout = Number(raw);
     if (dout !== 0 && dout !== 1) return { error: "setdigout 'dout' must be 0 or 1" };
     const command: Record<string, unknown> = { type: "setdigout", dout };
-    // Optional DOUT pulse timeout (milliseconds). Absent → the backward-
-    // compatible `setdigout <dout>` form; present → `setdigout <dout> <timeout>`.
+    // Optionally target a specific DOUT relay (defaults to DOUT 1).
+    const rawIndex = params.dout_index ?? params.index;
+    if (rawIndex !== undefined && rawIndex !== null && rawIndex !== "") {
+      const doutIndex = Number(rawIndex);
+      if (!Number.isInteger(doutIndex) || doutIndex < 1) return { error: "setdigout 'dout_index' must be a positive integer" };
+      command.dout_index = doutIndex;
+    }
+    // Optional DOUT pulse timeout (milliseconds).
     if (params.timeout !== undefined && params.timeout !== null && params.timeout !== "") {
       const timeout = Number(params.timeout);
       if (!Number.isInteger(timeout) || timeout < 0) return { error: "setdigout 'timeout' must be a non-negative integer" };
@@ -159,23 +167,41 @@ export function buildCommand(
     return { command: { type: "diagnostic", command: cmd } };
   }
 
+  if (type === "camreq") {
+    const command: Record<string, unknown> = { type: "camreq" };
+    const rawChannel = params.channel ?? params.camera_channel;
+    if (rawChannel !== undefined && rawChannel !== null && rawChannel !== "") {
+      const channel = Number(rawChannel);
+      if (!Number.isInteger(channel) || channel < 1) return { error: "camreq 'channel' must be a positive integer" };
+      command.channel = channel;
+    }
+    return { command };
+  }
+
   if (typeof params.command !== "string" || !params.command) return { error: "raw requires a 'command' string" };
   return { command: { type: "raw", command: params.command } };
 }
 
 /**
  * Serializes a built command into the Teltonika command string the VPS
- * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1`,
- * `setdigout 1 30000`, `getgps`).
+ * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1 1`,
+ * `setdigout 1 1 30000`, `getgps`, `camreq 1`).
+ *
+ * `setdigout` is emitted in the full `setdigout <state> <index> [timeout]`
+ * form; the DOUT index defaults to 1 when not supplied.
  */
 export function serializeCommand(command: Record<string, unknown>): string {
   switch (command.type) {
     case "setparam":
       return `setparam ${command.param_id}:${command.value}`;
-    case "setdigout":
-      return command.timeout !== undefined && command.timeout !== null
-        ? `setdigout ${command.dout} ${command.timeout}`
-        : `setdigout ${command.dout}`;
+    case "setdigout": {
+      const index = command.dout_index ?? 1;
+      const parts = ["setdigout", String(command.dout), String(index)];
+      if (command.timeout !== undefined && command.timeout !== null) parts.push(String(command.timeout));
+      return parts.join(" ");
+    }
+    case "camreq":
+      return command.channel !== undefined && command.channel !== null ? `camreq ${command.channel}` : "camreq";
     case "diagnostic":
     case "raw":
       return String(command.command);

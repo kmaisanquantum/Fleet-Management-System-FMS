@@ -72,6 +72,14 @@ const IO_GSM = [21];
 const IO_FUEL_COUNTER = [12, 13];
 /** IO 66 external (main) power voltage, reported in millivolts. */
 const IO_EXTERNAL_VOLTAGE = 66;
+/** IO 67 internal battery voltage, reported in millivolts. */
+const IO_INTERNAL_BATTERY = 67;
+/** IO 240 movement flag (1 = moving). */
+const IO_MOVEMENT = 240;
+/** IO 78 iButton / driver-ID read. */
+const IO_IBUTTON = 78;
+/** Millivolt -> volt / metre -> kilometre conversion (both report millis). */
+const MILLI = 0.001;
 /** Below this external voltage (mV) the device is running on internal battery. */
 const EXTERNAL_VOLTAGE_MIN_MV = 1000;
 
@@ -209,6 +217,37 @@ export function fuelLitersFromIo(
   return null;
 }
 
+/**
+ * Normalizes raw FMB125 IO elements into stored engineering values:
+ *   IO 66 external voltage mV -> V, IO 67 internal battery mV -> V,
+ *   IO 16 odometer m -> km, IO 240 movement -> 0/1, IO 78 iButton -> driver id.
+ * Absent elements yield `null` (never a bogus zero). The raw IO payload is kept
+ * verbatim in io_json; these are derived convenience values for the record.
+ */
+export interface NormalizedIo {
+  ext_voltage_v: number | null;
+  int_battery_v: number | null;
+  odometer_km: number | null;
+  movement: number | null;
+  driver_id: string | null;
+}
+
+export function normalizeIo(io: Record<string, number> = {}): NormalizedIo {
+  const toScaled = (raw: number | undefined) => (raw === undefined ? null : Number((raw * MILLI).toFixed(3)));
+  const ext = ioValue(io, [IO_EXTERNAL_VOLTAGE]);
+  const bat = ioValue(io, [IO_INTERNAL_BATTERY]);
+  const odo = ioValue(io, IO_ODOMETER);
+  const mov = ioValue(io, [IO_MOVEMENT]);
+  const ibutton = ioValue(io, [IO_IBUTTON]);
+  return {
+    ext_voltage_v: toScaled(ext),
+    int_battery_v: toScaled(bat),
+    odometer_km: toScaled(odo),
+    movement: mov === undefined ? null : (mov ? 1 : 0),
+    driver_id: ibutton === undefined ? null : String(ibutton),
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * Ingest schema
  * ------------------------------------------------------------------ */
@@ -281,7 +320,10 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     const vehicleId = device.vehicle_id;
     const recordedAt = normalizeTimestamp(input.timestamp);
     const io = input.io ?? {};
-    const odometer = input.odometer ?? ioValue(io, IO_ODOMETER) ?? 0;
+    // IO 16 odometer reports metres; store kilometres (the raw value stays in
+    // io_json). An explicit `odometer` from the relay is assumed already in km.
+    const normalized = normalizeIo(io);
+    const odometer = input.odometer ?? normalized.odometer_km ?? 0;
     const gsmSignal = ioValue(io, IO_GSM) ?? null;
     // Fuel: prefer an explicit fuel_liters; otherwise derive litres from the
     // raw IO 12/13 fuel counter via its configured scale_factor. Never store
@@ -319,10 +361,12 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     }
 
     // Canonical rich telemetry record, idempotent on (imei, recorded_at).
+    // The normalized FMB125 engineering values are stored alongside the raw IO.
     db.prepare(`
       INSERT OR IGNORE INTO telemetry_records (
-        id, imei, vehicle_id, recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters, io_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, imei, vehicle_id, recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters,
+        ext_voltage_v, int_battery_v, odometer_km, movement, driver_id, io_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       uuid(),
       input.imei,
@@ -334,6 +378,11 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
       input.speed_kmh ?? null,
       ignitionValue(input),
       fuelLiters,
+      normalized.ext_voltage_v,
+      normalized.int_battery_v,
+      normalized.odometer_km,
+      normalized.movement,
+      normalized.driver_id,
       Object.keys(io).length ? JSON.stringify(io) : null
     );
 
@@ -346,6 +395,10 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
           last_seen_at = datetime('now')
       WHERE id = ?
     `).run(input.lat, input.lon, recordedAt, odometer, vehicleId);
+
+    // Stamp the device's own last-seen so a per-device offline watchdog can tell
+    // a silent tracker from a silent vehicle.
+    db.prepare("UPDATE gps_devices SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(device.id);
 
     if (fuelLiters !== null) {
       const vehicle = db.prepare("SELECT tank_capacity_litres FROM vehicles WHERE id = ?").get(vehicleId) as { tank_capacity_litres: number | null } | undefined;
@@ -410,6 +463,72 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------ *
+ * Media capture ingest (POST) — authenticated by the ingest bearer token
+ * ------------------------------------------------------------------ */
+
+/** Body contract for a media capture reported by the relay. */
+export const mediaSchema = z.object({
+  imei: z.string().min(1),
+  trigger_type: z.string().min(1),
+  camera_channel: z.number().int().nullable().optional(),
+  media_type: z.string().min(1),
+  storage_url: z.string().min(1),
+  captured_at: z.string().refine((v) => !Number.isNaN(Date.parse(v)), {
+    message: "captured_at must be a valid ISO-8601 date-time",
+  }),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type MediaInput = z.infer<typeof mediaSchema>;
+
+/**
+ * POST /api/telemetry/media
+ * Records a camera/sensor capture against the reporting device's vehicle and
+ * tenant (resolved from the IMEI exactly like /ingest). 201 with the stored row.
+ */
+router.post("/media", requireIngestToken, (req, res, next) => {
+  try {
+    const parsed = mediaSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid media payload", details: parsed.error.flatten() });
+    }
+    const input = parsed.data;
+
+    const device = db
+      .prepare("SELECT id, vehicle_id, client_id FROM gps_devices WHERE device_identifier = ?")
+      .get(input.imei) as { id: string; vehicle_id: string | null; client_id: string | null } | undefined;
+    if (!device) {
+      return res.status(404).json({ error: "Unknown device", details: `No gps_device registered for IMEI '${input.imei}'` });
+    }
+    if (!device.vehicle_id) {
+      return res.status(400).json({ error: "Device not bound to a vehicle", details: `IMEI '${input.imei}' is registered but has no vehicle_id` });
+    }
+
+    const id = uuid();
+    db.prepare(`
+      INSERT INTO device_media (
+        id, device_id, vehicle_id, client_id, trigger_type, camera_channel, media_type, storage_url, captured_at, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      device.id,
+      device.vehicle_id,
+      device.client_id,
+      input.trigger_type,
+      input.camera_channel ?? null,
+      input.media_type,
+      input.storage_url,
+      normalizeTimestamp(input.captured_at),
+      input.metadata ? JSON.stringify(input.metadata) : null
+    );
+
+    return res.status(201).json({ data: db.prepare("SELECT * FROM device_media WHERE id = ?").get(id), message: "Media recorded" });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* ------------------------------------------------------------------ *
  * Read endpoints (JWT-authenticated, client-scoped)
  * ------------------------------------------------------------------ */
 
@@ -420,6 +539,32 @@ function clientClause(scopes: string[] | null, alias = "v"): { sql: string; para
   if (!scopes || scopes.length === 0) return { sql: "", params: [] };
   return { sql: ` AND ${alias}.client_id IN (${scopes.map(() => "?").join(", ")})`, params: scopes };
 }
+
+/**
+ * GET /api/telemetry/media?imei=
+ * Camera/sensor captures, most recent first, tenant-scoped (client-role users
+ * only see their own client's media). Optionally filtered to one device IMEI.
+ */
+router.get("/media", (req, res, next) => {
+  try {
+    const scope = resolveClientScopes(req.user);
+    const imei = req.query.imei as string | undefined;
+    const params: any[] = [];
+    let sql = "SELECT dm.* FROM device_media dm WHERE 1 = 1";
+    if (imei) {
+      sql += " AND dm.device_id IN (SELECT id FROM gps_devices WHERE device_identifier = ?)";
+      params.push(imei);
+    }
+    if (scope) {
+      sql += ` AND dm.client_id IN (${scope.map(() => "?").join(", ")})`;
+      params.push(...scope);
+    }
+    sql += " ORDER BY dm.captured_at DESC, dm.created_at DESC LIMIT 200";
+    res.json({ data: db.prepare(sql).all(...params) });
+  } catch (e) {
+    next(e);
+  }
+});
 
 export interface IoFeatureRow {
   io_id: number;
@@ -453,6 +598,26 @@ export function decodeIoFeatures(io: Record<string, number>, map: IoFeatureRow[]
       scaled_value: raw === null ? null : Number((Number(raw) * scale).toFixed(3)),
     };
   });
+}
+
+/** Device hardware capability flags stored as JSON on `gps_devices.capabilities`. */
+export interface DeviceCapabilities {
+  has_fuel_rs232?: boolean;
+  has_can_j1939?: boolean;
+  has_ble_sensors?: boolean;
+  has_camera?: boolean;
+  dout_count?: number;
+}
+
+/** Parses a `gps_devices.capabilities` JSON string; `null` when absent/invalid. */
+export function parseCapabilities(raw: string | null | undefined): DeviceCapabilities | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as DeviceCapabilities) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -521,8 +686,10 @@ router.get("/features/:imei", (req, res, next) => {
     const imei = req.params.imei;
 
     const device = db
-      .prepare("SELECT id, vehicle_id, client_id FROM gps_devices WHERE device_identifier = ?")
-      .get(imei) as { id: string; vehicle_id: string | null; client_id: string | null } | undefined;
+      .prepare("SELECT id, vehicle_id, client_id, device_model, capabilities, last_seen_at FROM gps_devices WHERE device_identifier = ?")
+      .get(imei) as
+      | { id: string; vehicle_id: string | null; client_id: string | null; device_model: string | null; capabilities: string | null; last_seen_at: string | null }
+      | undefined;
     if (!device?.vehicle_id) {
       return res.status(404).json({ error: "Unknown or unbound device", details: `No vehicle bound to IMEI '${imei}'` });
     }
@@ -536,7 +703,8 @@ router.get("/features/:imei", (req, res, next) => {
 
     const latest = db
       .prepare(`
-        SELECT recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters, io_json
+        SELECT recorded_at, lat, lon, sats, speed_kmh, ignition, fuel_liters,
+               ext_voltage_v, int_battery_v, odometer_km, movement, driver_id, io_json
         FROM telemetry_records WHERE imei = ? ORDER BY recorded_at DESC LIMIT 1
       `)
       .get(imei) as any;
@@ -560,9 +728,12 @@ router.get("/features/:imei", (req, res, next) => {
         imei,
         vehicle_id: device.vehicle_id,
         client_id: device.client_id,
+        device_model: device.device_model ?? null,
+        capabilities: parseCapabilities(device.capabilities),
         vehicle_number: vehicle?.vehicle_number ?? null,
         registration_number: vehicle?.registration_number ?? null,
         last_seen_at: vehicle?.last_seen_at ?? null,
+        device_last_seen_at: device.last_seen_at ?? null,
         online: isDeviceOnline(vehicle?.last_seen_at),
         live: latest
           ? {
@@ -573,6 +744,11 @@ router.get("/features/:imei", (req, res, next) => {
               speed_kmh: latest.speed_kmh,
               ignition: latest.ignition,
               fuel_liters: latest.fuel_liters,
+              ext_voltage_v: latest.ext_voltage_v,
+              int_battery_v: latest.int_battery_v,
+              odometer_km: latest.odometer_km,
+              movement: latest.movement,
+              driver_id: latest.driver_id,
             }
           : null,
         features: decodeIoFeatures(io),

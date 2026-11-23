@@ -122,7 +122,7 @@ export const telemetryApi = {
   commands: {
     issue: (body: {
       imei: string;
-      type: "setparam" | "setdigout" | "diagnostic" | "raw";
+      type: "setparam" | "setdigout" | "diagnostic" | "raw" | "camreq";
       params?: Record<string, string | number | boolean>;
       /** Required for an ignition cut (setdigout 1); stored on the command. */
       reason?: string;
@@ -134,7 +134,35 @@ export const telemetryApi = {
       getJson<{ data: DeviceCommand[] }>(`/commands${imei ? `?imei=${encodeURIComponent(imei)}` : ""}`),
     cancel: (id: string) => postJson<{ data: DeviceCommand; message: string }>(`/commands/${id}/cancel`),
   },
+
+  /** Camera / sensor captures recorded against a device, most recent first. */
+  media: (imei?: string) =>
+    getJson<{ data: DeviceMedia[] }>(`/media${imei ? `?imei=${encodeURIComponent(imei)}` : ""}`),
 };
+
+/** Camera/sensor capture stored in `device_media`. */
+export interface DeviceMedia {
+  id: string;
+  device_id: string;
+  vehicle_id: string | null;
+  client_id: string | null;
+  trigger_type: string;
+  camera_channel: number | null;
+  media_type: string;
+  storage_url: string;
+  captured_at: string;
+  metadata_json: string | null;
+  created_at: string;
+}
+
+/** Device hardware capability flags (from `gps_devices.capabilities`). */
+export interface DeviceCapabilities {
+  has_fuel_rs232?: boolean;
+  has_can_j1939?: boolean;
+  has_ble_sensors?: boolean;
+  has_camera?: boolean;
+  dout_count?: number;
+}
 
 export interface IoFeature {
   io_id: number;
@@ -161,9 +189,15 @@ export interface DeviceFeatures {
   imei: string;
   vehicle_id: string;
   client_id: string | null;
+  /** Tracker hardware model, e.g. "FMB125". */
+  device_model: string | null;
+  /** Hardware capability flags; null when the device has none recorded. */
+  capabilities: DeviceCapabilities | null;
   vehicle_number: string | null;
   registration_number: string | null;
   last_seen_at: string | null;
+  /** Per-device last successful ingest (offline watchdog). */
+  device_last_seen_at: string | null;
   online: boolean;
   live: {
     recorded_at: string;
@@ -173,6 +207,11 @@ export interface DeviceFeatures {
     speed_kmh: number | null;
     ignition: number | null;
     fuel_liters: number | null;
+    ext_voltage_v: number | null;
+    int_battery_v: number | null;
+    odometer_km: number | null;
+    movement: number | null;
+    driver_id: string | null;
   } | null;
   features: IoFeature[];
   events: DeviceEvent[];
@@ -184,7 +223,7 @@ export interface DeviceCommand {
   id: string;
   imei: string;
   vehicle_id: string | null;
-  command_type: "setparam" | "setdigout" | "diagnostic" | "raw";
+  command_type: "setparam" | "setdigout" | "diagnostic" | "raw" | "camreq";
   payload_json: string;
   status: CommandStatus;
   requested_by: string | null;

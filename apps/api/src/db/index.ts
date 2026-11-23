@@ -13,6 +13,20 @@ export const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+/**
+ * Default capability profile for the Teltonika FMB125 (RS232 fuel probe, no
+ * CAN/BLE/camera, two digital outputs). Stored as JSON on `gps_devices.capabilities`.
+ */
+export const FMB125_CAPABILITIES = {
+  has_fuel_rs232: true,
+  has_can_j1939: false,
+  has_ble_sensors: false,
+  has_camera: false,
+  dout_count: 2,
+} as const;
+
+export const FMB125_CAPABILITIES_JSON = JSON.stringify(FMB125_CAPABILITIES);
+
 export function initSchema() {
   const candidatePaths = [
     path.join(__dirname, "schema.sql"),
@@ -83,8 +97,26 @@ function migrateExistingDatabase() {
   addColumn("gps_positions", "sats", "INTEGER");
   addColumn("gps_positions", "fuel_liters", "REAL");
 
+  // telemetry_records — normalized FMB125 engineering values (raw IO in io_json).
+  addColumn("telemetry_records", "ext_voltage_v", "REAL");
+  addColumn("telemetry_records", "int_battery_v", "REAL");
+  addColumn("telemetry_records", "odometer_km", "REAL");
+  addColumn("telemetry_records", "movement", "INTEGER");
+  addColumn("telemetry_records", "driver_id", "TEXT");
+
   // gps_devices — vendor/protocol discriminator
   addColumn("gps_devices", "device_type", "TEXT NOT NULL DEFAULT 'meshsat'");
+
+  // gps_devices — hardware profile (model + JSON capability flags) + offline watchdog
+  addColumn("gps_devices", "device_model", "TEXT DEFAULT 'FMB125'");
+  addColumn("gps_devices", "capabilities", "TEXT");
+  addColumn("gps_devices", "last_seen_at", "TEXT");
+
+  // io_feature_map / param_map — per-model mapping + engineering unit label.
+  addColumn("io_feature_map", "device_model", "TEXT");
+  addColumn("io_feature_map", "unit", "TEXT");
+  addColumn("param_map", "device_model", "TEXT");
+  addColumn("param_map", "unit", "TEXT");
 
   // vehicles — live-state fields fed by telemetry
   addColumn("vehicles", "current_fuel_level_pct", "REAL");
@@ -139,6 +171,11 @@ function migrateExistingDatabase() {
     speed_kmh REAL,
     ignition INTEGER,
     fuel_liters REAL,
+    ext_voltage_v REAL,
+    int_battery_v REAL,
+    odometer_km REAL,
+    movement INTEGER,
+    driver_id TEXT,
     io_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (imei, recorded_at)
@@ -147,7 +184,7 @@ function migrateExistingDatabase() {
     id TEXT PRIMARY KEY,
     imei TEXT NOT NULL,
     vehicle_id TEXT REFERENCES vehicles(id),
-    command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
+    command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
     payload_json TEXT,
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
     requested_by TEXT REFERENCES users(id),
@@ -157,6 +194,19 @@ function migrateExistingDatabase() {
     response_text TEXT,
     acked_at TEXT
   );`);
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS device_media (
+    id TEXT PRIMARY KEY,
+    device_id TEXT REFERENCES gps_devices(id),
+    vehicle_id TEXT REFERENCES vehicles(id),
+    client_id TEXT REFERENCES clients(id),
+    trigger_type TEXT NOT NULL,
+    camera_channel INTEGER,
+    media_type TEXT NOT NULL,
+    storage_url TEXT NOT NULL,
+    captured_at TEXT,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );`);
   runIgnoreErrors(`CREATE TABLE IF NOT EXISTS io_feature_map (
     id TEXT PRIMARY KEY,
     io_id INTEGER NOT NULL,
@@ -165,6 +215,8 @@ function migrateExistingDatabase() {
     value_type TEXT NOT NULL DEFAULT 'event' CHECK (value_type IN ('event', 'scalar', 'boolean')),
     enabled INTEGER NOT NULL DEFAULT 1,
     scale_factor REAL NOT NULL DEFAULT 1,
+    device_model TEXT,
+    unit TEXT,
     UNIQUE (io_id, feature_key)
   );`);
   runIgnoreErrors(`CREATE TABLE IF NOT EXISTS param_map (
@@ -172,32 +224,43 @@ function migrateExistingDatabase() {
     feature_key TEXT NOT NULL,
     param_id INTEGER NOT NULL,
     description TEXT,
+    device_model TEXT,
+    unit TEXT,
     UNIQUE (feature_key, param_id)
   );`);
 
   // Reference defaults for the IO feature map and Teltonika parameter map.
   // INSERT OR IGNORE keeps operator edits intact across restarts.
-  runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
-    ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001),
-    ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001),
-    ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001),
-    ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001),
-    ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001),
-    ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1),
-    ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1),
-    ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1),
-    ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1),
-    ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event',   1),
-    ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event',   1),
-    ('iof-towing',          246, 'towing',            'Towing Detected',                  'event',   1),
-    ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1),
-    ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1),
-    ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1),
-    ('iof-ignition',        239, 'ignition',          'Ignition State',                   'boolean', 1),
-    ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1),
-    ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1),
-    ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1),
-    ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar',  1);`);
+  runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor, unit) VALUES
+    ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001, 'L'),
+    ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001, 'L'),
+    ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001, 'km'),
+    ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001, 'V'),
+    ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001, 'V'),
+    ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1,     NULL),
+    ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1,     NULL),
+    ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1,     NULL),
+    ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1,     NULL),
+    ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event',   1,     NULL),
+    ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event',   1,     NULL),
+    ('iof-towing',          246, 'towing',            'Towing Detected',                  'event',   1,     NULL),
+    ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1,     NULL),
+    ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1,     NULL),
+    ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1,     NULL),
+    ('iof-ignition',        239, 'ignition',          'Ignition State',                   'boolean', 1,     NULL),
+    ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1,     NULL),
+    ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1,     NULL),
+    ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1,     NULL),
+    ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar',  1,     NULL);`);
+  // Backfill engineering-unit labels on rows created before the `unit` column
+  // existed (schema.sql's INSERT OR IGNORE no-ops on an existing row).
+  runIgnoreErrors("UPDATE io_feature_map SET unit = 'km' WHERE io_id = 16 AND (unit IS NULL OR unit = '');");
+  runIgnoreErrors("UPDATE io_feature_map SET unit = 'V' WHERE io_id IN (66, 67) AND (unit IS NULL OR unit = '');");
+
+  // Backfill device profiles: every pre-existing device row defaults to FMB125
+  // with the standard 2-DOUT capability profile.
+  runIgnoreErrors("UPDATE gps_devices SET device_model = 'FMB125' WHERE device_model IS NULL OR device_model = '';");
+  db.prepare("UPDATE gps_devices SET capabilities = ? WHERE capabilities IS NULL OR capabilities = ''").run(FMB125_CAPABILITIES_JSON);
   runIgnoreErrors(`INSERT OR IGNORE INTO param_map (id, feature_key, param_id, description) VALUES
     ('pm-overspeed-threshold', 'overspeed_threshold',   1580, 'Overspeeding threshold (km/h)'),
     ('pm-idling-timeout',      'idling_timeout',        1581, 'Excessive idling timeout (seconds)'),
@@ -212,6 +275,8 @@ function migrateExistingDatabase() {
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_vehicle ON telemetry_records(vehicle_id, recorded_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei, recorded_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_media_device ON device_media(device_id, captured_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_media_captured ON device_media(captured_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_vehicles_client ON vehicles(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_devices_client ON gps_devices(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);");
@@ -257,18 +322,16 @@ function migrateExistingDatabase() {
     );`
   );
 
-  // Device commands gained a 'diagnostic' type (read-only getinfo/getgps/...) and
-  // an 'acknowledged' status (tracker Codec 12 reply), plus `reason` / `acked_at`.
-  // The rebuild adds whichever CHECK value is missing; `reason`/`acked_at` are
+  // Device commands gained a 'diagnostic' type (read-only getinfo/getgps/...)
+  // and an 'acknowledged' status (tracker Codec 12 reply), plus `reason` /
+  // `acked_at`. A later release added the 'camreq' (camera request) type. The
+  // rebuild adds whichever CHECK value is missing; `reason`/`acked_at` are
   // added beforehand by addColumn() so the copy below stays column-complete.
-  rebuildIfCheckMissing(
-    "device_commands",
-    "acknowledged",
-    `CREATE TABLE device_commands (
+  const deviceCommandsCreateSql = `CREATE TABLE device_commands (
       id TEXT PRIMARY KEY,
       imei TEXT NOT NULL,
       vehicle_id TEXT REFERENCES vehicles(id),
-      command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
+      command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
       payload_json TEXT,
       status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
       requested_by TEXT REFERENCES users(id),
@@ -277,8 +340,9 @@ function migrateExistingDatabase() {
       sent_at TEXT,
       response_text TEXT,
       acked_at TEXT
-    );`
-  );
+    );`;
+  rebuildIfCheckMissing("device_commands", "acknowledged", deviceCommandsCreateSql);
+  rebuildIfCheckMissing("device_commands", "camreq", deviceCommandsCreateSql);
 }
 
 function runIgnoreErrors(sql: string) {

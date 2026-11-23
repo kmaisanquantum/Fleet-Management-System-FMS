@@ -169,8 +169,14 @@ CREATE TABLE IF NOT EXISTS gps_devices (
   vehicle_id TEXT REFERENCES vehicles(id),
   device_identifier TEXT UNIQUE NOT NULL,
   device_type TEXT NOT NULL DEFAULT 'meshsat' CHECK(device_type IN ('meshsat', 'teltonika')),
+  -- Hardware model (e.g. FMB125). Drives which UI tabs / IO mappings apply.
+  device_model TEXT DEFAULT 'FMB125',
+  -- JSON capability flags: {has_fuel_rs232, has_can_j1939, has_ble_sensors, has_camera, dout_count}
+  capabilities TEXT,
   client_id TEXT REFERENCES clients(id),
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'maintenance')),
+  -- Wall-clock time of the most recent successful ingest for this device.
+  last_seen_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -219,6 +225,13 @@ CREATE TABLE IF NOT EXISTS telemetry_records (
   speed_kmh REAL,
   ignition INTEGER,
   fuel_liters REAL,
+  -- Normalized FMB125 engineering values (raw IO kept in io_json).
+  ext_voltage_v REAL,
+  int_battery_v REAL,
+  odometer_km REAL,
+  movement INTEGER,
+  -- Driver identity from the iButton reader (IO 78) when present.
+  driver_id TEXT,
   io_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (imei, recorded_at)
@@ -229,7 +242,7 @@ CREATE TABLE IF NOT EXISTS device_commands (
   id TEXT PRIMARY KEY,
   imei TEXT NOT NULL,
   vehicle_id TEXT REFERENCES vehicles(id),
-  command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
+  command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
   payload_json TEXT,
   -- queued -> sent -> acknowledged, or failed. 'acked' is kept as a legacy
   -- synonym so pre-existing rows/readers continue to work.
@@ -244,6 +257,23 @@ CREATE TABLE IF NOT EXISTS device_commands (
   acked_at TEXT
 );
 
+-- Media (camera stills, clips) captured by a device and reported by the relay
+-- via POST /api/telemetry/media. Listed per-device in the UI Media tab.
+CREATE TABLE IF NOT EXISTS device_media (
+  id TEXT PRIMARY KEY,
+  device_id TEXT REFERENCES gps_devices(id),
+  vehicle_id TEXT REFERENCES vehicles(id),
+  client_id TEXT REFERENCES clients(id),
+  -- What triggered the capture (e.g. panic, ignition, request, motion).
+  trigger_type TEXT NOT NULL,
+  camera_channel INTEGER,
+  media_type TEXT NOT NULL,
+  storage_url TEXT NOT NULL,
+  captured_at TEXT,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Configurable IO-ID -> feature mapping (edit to match the FMB125 Configurator).
 CREATE TABLE IF NOT EXISTS io_feature_map (
   id TEXT PRIMARY KEY,
@@ -255,6 +285,10 @@ CREATE TABLE IF NOT EXISTS io_feature_map (
   -- Multiplier applied to the raw IO value (e.g. fuel counters report
   -- millilitres, so scale 0.001 converts them to litres).
   scale_factor REAL NOT NULL DEFAULT 1,
+  -- NULL device_model = applies to all models.
+  device_model TEXT,
+  -- Engineering unit label for the scaled value (e.g. V, km, L).
+  unit TEXT,
   UNIQUE (io_id, feature_key)
 );
 
@@ -264,6 +298,10 @@ CREATE TABLE IF NOT EXISTS param_map (
   feature_key TEXT NOT NULL,
   param_id INTEGER NOT NULL,
   description TEXT,
+  -- NULL device_model = applies to all models.
+  device_model TEXT,
+  -- Engineering unit label for the parameter value (e.g. km/h, s, m).
+  unit TEXT,
   UNIQUE (feature_key, param_id)
 );
 
@@ -477,32 +515,34 @@ CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);
 CREATE INDEX IF NOT EXISTS idx_telemetry_records_vehicle ON telemetry_records(vehicle_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_media_device ON device_media(device_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_media_captured ON device_media(captured_at DESC);
 
 -- Default IO feature map (Teltonika FMB125 AVL element ids). Starting defaults
 -- only — edit to match the device's configured IO list (see Settings screen).
 -- The GNSS fuel counters (IO 12/13) report millilitres, hence scale_factor
 -- 0.001 so the ingest fallback stores litres in fuel_liters.
-INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
-  ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001),
-  ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001),
-  ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001),
-  ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001),
-  ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001),
-  ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1),
-  ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1),
-  ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1),
-  ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1),
-  ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event',   1),
-  ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event',   1),
-  ('iof-towing',          246, 'towing',            'Towing Detected',                  'event',   1),
-  ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1),
-  ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1),
-  ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1),
-  ('iof-ignition',        239, 'ignition',          'Ignition State',                   'boolean', 1),
-  ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1),
-  ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1),
-  ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1),
-  ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar',  1);
+INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor, unit) VALUES
+  ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001, 'L'),
+  ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001, 'L'),
+  ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001, 'km'),
+  ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001, 'V'),
+  ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001, 'V'),
+  ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1,     NULL),
+  ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1,     NULL),
+  ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1,     NULL),
+  ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1,     NULL),
+  ('iof-idling',          251, 'idling',            'Excessive Idling',                 'event',   1,     NULL),
+  ('iof-unplug',          252, 'power_unplug',      'Power Unplug / Tamper',            'event',   1,     NULL),
+  ('iof-towing',          246, 'towing',            'Towing Detected',                  'event',   1,     NULL),
+  ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1,     NULL),
+  ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1,     NULL),
+  ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1,     NULL),
+  ('iof-ignition',        239, 'ignition',          'Ignition State',                   'boolean', 1,     NULL),
+  ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1,     NULL),
+  ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1,     NULL),
+  ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1,     NULL),
+  ('iof-ibutton',         78,  'ibutton',           'iButton / Driver ID Read',         'scalar',  1,     NULL);
 
 -- Default Teltonika parameter map (parameter ids are device-configurable).
 INSERT OR IGNORE INTO param_map (id, feature_key, param_id, description) VALUES
