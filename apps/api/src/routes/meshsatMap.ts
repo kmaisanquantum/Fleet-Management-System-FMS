@@ -14,7 +14,9 @@ import { verifyAccessToken } from "../middleware/auth";
  * `/api/meshsat-map/map` → `<MESHSAT_MAP_ORIGIN>/map` and
  * `/api/meshsat-map/api/positions` → `<MESHSAT_MAP_ORIGIN>/api/positions` (the
  * data endpoint the map's inline script polls). HTML responses have their
- * absolute and root-relative URLs rewritten to the proxy prefix, and framing
+ * MeshSat-absolute and root-relative URLs rewritten to the proxy prefix, while
+ * absolute URLs to *other* origins (e.g. `*.openstreetmap.org` tiles,
+ * `unpkg.com`) are left untouched so the browser fetches them directly. Framing
  * headers are stripped so the page renders inside the FMS iframe.
  *
  * Note: absolute-URL WebSocket/SSE connections opened by the map's inline script
@@ -24,6 +26,14 @@ import { verifyAccessToken } from "../middleware/auth";
 
 const DEFAULT_MESHSAT_MAP_ORIGIN = "https://meshsat.dspng.space";
 const PROXY_PREFIX = "/api/meshsat-map";
+
+/**
+ * Identifying User-Agent sent upstream. Tile servers such as OpenStreetMap
+ * require a descriptive agent; requests that still reach the proxy (e.g. a
+ * root-relative tile path on MeshSat) are forwarded with this header rather
+ * than an anonymous one.
+ */
+const PROXY_USER_AGENT = "FleetManagementSystem/1.0 (fleet.dspng.tech)";
 
 /** Cookie that carries the FMS JWT for the map's same-origin sub-requests. */
 export const MAP_COOKIE_NAME = "fms_map_token";
@@ -121,15 +131,24 @@ export function sanitizeUpstreamHeaders(headers: Headers): Record<string, string
 }
 
 /**
- * Rewrite absolute MeshSat URLs and root-relative `src`/`href`/`action`/
+ * Rewrite MeshSat-absolute URLs and root-relative `src`/`href`/`action`/
  * `fetch(`/`url(` references to the proxy prefix so assets and data calls flow
  * back through the proxy. Already-prefixed paths are left untouched.
+ *
+ * Absolute URLs to any *other* origin are deliberately preserved so the browser
+ * fetches them directly — `*.openstreetmap.org` tiles, `unpkg.com` assets, and
+ * other third-party hosts. Routing OSM tiles through the proxy would fetch them
+ * server-side, which violates OSM's tile usage policy and makes OSM return its
+ * "Access blocked" placeholder (HTTP 200). A protocol-relative `//host/...`
+ * reference is an absolute third-party URL too, so it is left alone as well.
  */
 export function rewriteMeshSatUrls(html: string, origin: string): string {
   let out = html.split(origin).join(PROXY_PREFIX);
-  out = out.replace(/(src|href|action)=("|')\/(?!api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
-  out = out.replace(/fetch\((["'])\/(?!api\/meshsat-map)/gi, `fetch($1${PROXY_PREFIX}/`);
-  out = out.replace(/url\((["']?)\/(?!api\/meshsat-map)/gi, `url($1${PROXY_PREFIX}/`);
+  // A single leading slash is a root-relative FMS path; `//` starts an absolute
+  // third-party URL, and already-proxied paths are left untouched.
+  out = out.replace(/(src|href|action)=("|')\/(?!\/|api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
+  out = out.replace(/fetch\((["'])\/(?!\/|api\/meshsat-map)/gi, `fetch($1${PROXY_PREFIX}/`);
+  out = out.replace(/url\((["']?)\/(?!\/|api\/meshsat-map)/gi, `url($1${PROXY_PREFIX}/`);
   return out;
 }
 
@@ -157,6 +176,7 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
       headers: {
         ...(authorization ? { authorization } : {}),
         accept: (req.headers.accept as string) || "*/*",
+        "user-agent": PROXY_USER_AGENT,
       },
     });
   } catch {

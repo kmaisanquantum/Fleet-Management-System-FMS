@@ -82,7 +82,7 @@ describe("MeshSat map proxy", () => {
     expect(res.status).toBe(401);
   });
 
-  it("injects the upstream Basic Authorization header", async () => {
+  it("injects the upstream Basic Authorization and User-Agent headers", async () => {
     const calls: UpstreamCall[] = [];
     mockUpstream(
       () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
@@ -92,6 +92,9 @@ describe("MeshSat map proxy", () => {
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe(EXPECTED_BASIC);
+    expect((calls[0].init.headers as Record<string, string>)["user-agent"]).toBe(
+      "FleetManagementSystem/1.0 (fleet.dspng.tech)",
+    );
   });
 
   it("forwards the query string while dropping fms_token", async () => {
@@ -125,6 +128,43 @@ describe("MeshSat map proxy", () => {
     expect(body).toContain('fetch("/api/meshsat-map/api/positions")');
     expect(body).toContain("fetch('/api/meshsat-map/api/live')");
     expect(body).toContain("url(/api/meshsat-map/bg.png)");
+  });
+
+  it("leaves third-party absolute URLs untouched and rewrites MeshSat-relative ones", async () => {
+    const html =
+      '<!doctype html><html><head>' +
+      '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>' +
+      '<link href="//unpkg.com/leaflet.css">' +
+      "</head><body>" +
+      '<img src="https://tile.openstreetmap.org/3/4/5.png">' +
+      '<img src="//tile.openstreetmap.org/3/4/5.png">' +
+      '<script>fetch("//tile.openstreetmap.org/3/4/5.png");</script>' +
+      "<style>body{background:url(\"https://unpkg.com/bg.png\")}</style>" +
+      '<img src="/tile.png">' +
+      '<script src="https://meshsat.example.test/app.js"></script>' +
+      '<script>fetch("/api/positions");</script>' +
+      "</body></html>";
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    const body = await res.text();
+
+    // External origins (OSM tiles, unpkg assets) are fetched directly by the browser.
+    expect(body).toContain('src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"');
+    expect(body).toContain('href="//unpkg.com/leaflet.css"');
+    expect(body).toContain('src="https://tile.openstreetmap.org/3/4/5.png"');
+    expect(body).toContain('src="//tile.openstreetmap.org/3/4/5.png"');
+    expect(body).toContain('fetch("//tile.openstreetmap.org/3/4/5.png")');
+    expect(body).toContain('url("https://unpkg.com/bg.png")');
+    expect(body).not.toContain("/api/meshsat-map//");
+
+    // MeshSat-absolute and root-relative URLs still flow back through the proxy.
+    expect(body).toContain('src="/api/meshsat-map/app.js"');
+    expect(body).toContain('src="/api/meshsat-map/tile.png"');
+    expect(body).toContain('fetch("/api/meshsat-map/api/positions")');
   });
 
   it("strips X-Frame-Options and the CSP frame-ancestors directive", async () => {
