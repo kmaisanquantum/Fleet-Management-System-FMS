@@ -126,6 +126,9 @@ CREATE TABLE IF NOT EXISTS vehicles (
   current_longitude REAL,
   current_location_name TEXT,
   last_gps_fix_at TEXT,
+  -- Wall-clock time of the most recent successful telemetry ingest (offline
+  -- watchdog: a vehicle is 'online' when this is within DEVICE_OFFLINE_MINUTES).
+  last_seen_at TEXT,
   current_fuel_level_pct REAL,
   current_engine_hours REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -228,11 +231,17 @@ CREATE TABLE IF NOT EXISTS device_commands (
   vehicle_id TEXT REFERENCES vehicles(id),
   command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
   payload_json TEXT,
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+  -- queued -> sent -> acknowledged, or failed. 'acked' is kept as a legacy
+  -- synonym so pre-existing rows/readers continue to work.
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
   requested_by TEXT REFERENCES users(id),
+  -- Operator-supplied justification (required for an ignition cut).
+  reason TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   sent_at TEXT,
-  response_text TEXT
+  response_text TEXT,
+  -- Set when the tracker acknowledges the command (Codec 12 reply).
+  acked_at TEXT
 );
 
 -- Configurable IO-ID -> feature mapping (edit to match the FMB125 Configurator).
@@ -476,6 +485,10 @@ CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, cre
 INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
   ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001),
   ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001),
+  ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001),
+  ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001),
+  ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001),
+  ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1),
   ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1),
   ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1),
   ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1),

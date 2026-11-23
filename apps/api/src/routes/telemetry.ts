@@ -12,8 +12,27 @@ const router = Router();
  * Teltonika FMB125 AVL IO element interpretation
  * ------------------------------------------------------------------ */
 
-/** Fuel level must change by at least this many litres to count as refuel/drain. */
+/** Default fuel level change (litres) required to count as a refuel/drain. */
 export const FUEL_DELTA_THRESHOLD_L = 5;
+
+/** Reads a non-negative number from an env var, falling back when unset/invalid. */
+function numericEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+/**
+ * Configurable refuel / drain thresholds (litres), read from the environment at
+ * call time so a deployment can tune them without a rebuild:
+ *   FUEL_REFUEL_MIN_L (default 5), FUEL_DRAIN_MIN_L (default 5).
+ * Deltas smaller than the threshold are treated as sensor jitter and ignored.
+ */
+export function fuelThresholds(): { refuel: number; drain: number } {
+  return {
+    refuel: numericEnv("FUEL_REFUEL_MIN_L", FUEL_DELTA_THRESHOLD_L),
+    drain: numericEnv("FUEL_DRAIN_MIN_L", FUEL_DELTA_THRESHOLD_L),
+  };
+}
 
 export interface IoAlertRule {
   ioId: number;
@@ -51,6 +70,10 @@ const IO_IGNITION = [239];
 const IO_GSM = [21];
 /** IO 12/13 are the Teltonika fuel counter elements (raw, stored in io_json). */
 const IO_FUEL_COUNTER = [12, 13];
+/** IO 66 external (main) power voltage, reported in millivolts. */
+const IO_EXTERNAL_VOLTAGE = 66;
+/** Below this external voltage (mV) the device is running on internal battery. */
+const EXTERNAL_VOLTAGE_MIN_MV = 1000;
 
 export interface InterpretedAlert {
   type: string;
@@ -92,6 +115,22 @@ export function interpretIoAlerts(io: Record<string, number> = {}): InterpretedA
     });
   }
 
+  // Main-power cut: IO 66 external voltage drops below the internal-battery
+  // threshold, i.e. the tracker has lost vehicle power (a power_unplug-style
+  // event). Only fires when the element is actually present in the payload.
+  const extRaw = io[String(IO_EXTERNAL_VOLTAGE)];
+  if (extRaw !== undefined && extRaw !== null && Number(extRaw) < EXTERNAL_VOLTAGE_MIN_MV) {
+    alerts.push({
+      type: "power_unplug",
+      ruleCode: "RULE_MAIN_POWER_CUT",
+      severity: "critical",
+      category: "security",
+      description: `External power lost (IO ${IO_EXTERNAL_VOLTAGE}=${extRaw} mV).`,
+      ioId: IO_EXTERNAL_VOLTAGE,
+      value: Number(extRaw),
+    });
+  }
+
   for (let id = GEOFENCE_ZONE_IO_MIN; id <= GEOFENCE_ZONE_IO_MAX; id++) {
     const value = io[String(id)];
     if (value === undefined || value === null || !Number(value)) continue;
@@ -109,13 +148,39 @@ export function interpretIoAlerts(io: Record<string, number> = {}): InterpretedA
   return alerts;
 }
 
-/** Classifies a change in absolute fuel level as a refuel, a drain, or neither. */
+/**
+ * Classifies a change in absolute fuel level as a refuel, a drain, or neither.
+ * Deltas smaller than the configured thresholds (`fuelThresholds()`) are treated
+ * as sensor jitter (rough roads) and ignored.
+ */
 export function detectFuelDelta(previous: number | null, current: number | null): "refuel" | "drain" | null {
   if (previous === null || current === null) return null;
   const delta = current - previous;
-  if (delta >= FUEL_DELTA_THRESHOLD_L) return "refuel";
-  if (delta <= -FUEL_DELTA_THRESHOLD_L) return "drain";
+  const { refuel, drain } = fuelThresholds();
+  if (delta >= refuel) return "refuel";
+  if (delta <= -drain) return "drain";
   return null;
+}
+
+/**
+ * Offline window in minutes, from `DEVICE_OFFLINE_MINUTES` (default 15). A
+ * device whose `last_seen_at` is older than this is considered offline.
+ */
+export function offlineWindowMinutes(): number {
+  const raw = Number(process.env.DEVICE_OFFLINE_MINUTES);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15;
+}
+
+/**
+ * True when the device was last seen within the offline window. Handles both
+ * the SQLite `YYYY-MM-DD HH:MM:SS` (UTC) form and ISO-8601 timestamps.
+ */
+export function isDeviceOnline(lastSeenAt: string | null | undefined, now: number = Date.now()): boolean {
+  if (!lastSeenAt) return false;
+  const iso = lastSeenAt.includes("T") ? lastSeenAt : lastSeenAt.replace(" ", "T") + "Z";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return false;
+  return now - t <= offlineWindowMinutes() * 60 * 1000;
 }
 
 /** Configured fuel-counter IO rows (feature_key 'fuel_counter') with their scale. */
@@ -272,11 +337,13 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
       Object.keys(io).length ? JSON.stringify(io) : null
     );
 
-    // Update vehicle live-state cache
+    // Update vehicle live-state cache; last_seen_at stamps the successful
+    // ingest so the offline watchdog can tell fresh data from a silent device.
     db.prepare(`
       UPDATE vehicles
       SET current_latitude = ?, current_longitude = ?, last_gps_fix_at = ?,
-          current_odometer = MAX(current_odometer, ?), updated_at = datetime('now')
+          current_odometer = MAX(current_odometer, ?), updated_at = datetime('now'),
+          last_seen_at = datetime('now')
       WHERE id = ?
     `).run(input.lat, input.lon, recordedAt, odometer, vehicleId);
 
@@ -411,6 +478,7 @@ router.get("/latest", (req, res, next) => {
         v.current_longitude AS lon,
         v.current_fuel_level_pct AS fuel_level_pct,
         v.last_gps_fix_at AS recorded_at,
+        v.last_seen_at,
         vsv.computed_status,
         gp.speed,
         gp.heading,
@@ -432,9 +500,11 @@ router.get("/latest", (req, res, next) => {
       ) gp ON v.id = gp.vehicle_id
       WHERE v.status != 'disposed'${clause}
       ORDER BY v.vehicle_number ASC
-    `).all(...params);
+    `).all(...params) as any[];
 
-    res.json({ data: rows });
+    // Offline watchdog: flag each vehicle from its last successful ingest.
+    const data = rows.map((r) => ({ ...r, online: isDeviceOnline(r.last_seen_at) }));
+    res.json({ data });
   } catch (e) {
     next(e);
   }
@@ -461,8 +531,8 @@ router.get("/features/:imei", (req, res, next) => {
     }
 
     const vehicle = db
-      .prepare("SELECT vehicle_number, registration_number FROM vehicles WHERE id = ?")
-      .get(device.vehicle_id) as { vehicle_number: string; registration_number: string } | undefined;
+      .prepare("SELECT vehicle_number, registration_number, last_seen_at FROM vehicles WHERE id = ?")
+      .get(device.vehicle_id) as { vehicle_number: string; registration_number: string; last_seen_at: string | null } | undefined;
 
     const latest = db
       .prepare(`
@@ -492,6 +562,8 @@ router.get("/features/:imei", (req, res, next) => {
         client_id: device.client_id,
         vehicle_number: vehicle?.vehicle_number ?? null,
         registration_number: vehicle?.registration_number ?? null,
+        last_seen_at: vehicle?.last_seen_at ?? null,
+        online: isDeviceOnline(vehicle?.last_seen_at),
         live: latest
           ? {
               recorded_at: latest.recorded_at,

@@ -89,6 +89,12 @@ function migrateExistingDatabase() {
   // vehicles — live-state fields fed by telemetry
   addColumn("vehicles", "current_fuel_level_pct", "REAL");
   addColumn("vehicles", "current_engine_hours", "REAL");
+  // Offline watchdog: updated on every successful ingest.
+  addColumn("vehicles", "last_seen_at", "TEXT");
+
+  // device_commands — operator reason + tracker-ack timestamp (Codec 12 replies).
+  addColumn("device_commands", "reason", "TEXT");
+  addColumn("device_commands", "acked_at", "TEXT");
 
   // Client (tenant) scoping — vehicles/devices carry the tenant id; users are
   // mapped to clients through the user_clients join table.
@@ -143,11 +149,13 @@ function migrateExistingDatabase() {
     vehicle_id TEXT REFERENCES vehicles(id),
     command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
     payload_json TEXT,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
     requested_by TEXT REFERENCES users(id),
+    reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     sent_at TEXT,
-    response_text TEXT
+    response_text TEXT,
+    acked_at TEXT
   );`);
   runIgnoreErrors(`CREATE TABLE IF NOT EXISTS io_feature_map (
     id TEXT PRIMARY KEY,
@@ -172,6 +180,10 @@ function migrateExistingDatabase() {
   runIgnoreErrors(`INSERT OR IGNORE INTO io_feature_map (id, io_id, feature_key, label, value_type, scale_factor) VALUES
     ('iof-fuel-counter-12', 12,  'fuel_counter',      'GNSS Fuel Counter (primary)',      'scalar',  0.001),
     ('iof-fuel-counter-13', 13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',    'scalar',  0.001),
+    ('iof-odometer',        16,  'odometer',          'Odometer',                         'scalar',  0.001),
+    ('iof-external-voltage', 66, 'external_voltage',  'External Voltage',                 'scalar',  0.001),
+    ('iof-internal-battery', 67, 'internal_battery',  'Internal Battery',                 'scalar',  0.001),
+    ('iof-movement',        240, 'movement',          'Movement',                         'boolean', 1),
     ('iof-overspeed',       255, 'overspeed',         'Overspeeding',                     'event',   1),
     ('iof-eco-accel',       253, 'eco_accel',         'Eco Driving — Harsh Acceleration', 'event',   1),
     ('iof-eco-brake',       254, 'eco_brake',         'Eco Driving — Harsh Braking',      'event',   1),
@@ -245,21 +257,26 @@ function migrateExistingDatabase() {
     );`
   );
 
-  // Device commands gained a 'diagnostic' type (read-only getinfo/getgps/...).
+  // Device commands gained a 'diagnostic' type (read-only getinfo/getgps/...) and
+  // an 'acknowledged' status (tracker Codec 12 reply), plus `reason` / `acked_at`.
+  // The rebuild adds whichever CHECK value is missing; `reason`/`acked_at` are
+  // added beforehand by addColumn() so the copy below stays column-complete.
   rebuildIfCheckMissing(
     "device_commands",
-    "diagnostic",
+    "acknowledged",
     `CREATE TABLE device_commands (
       id TEXT PRIMARY KEY,
       imei TEXT NOT NULL,
       vehicle_id TEXT REFERENCES vehicles(id),
       command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
       payload_json TEXT,
-      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
       requested_by TEXT REFERENCES users(id),
+      reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       sent_at TEXT,
-      response_text TEXT
+      response_text TEXT,
+      acked_at TEXT
     );`
   );
 }

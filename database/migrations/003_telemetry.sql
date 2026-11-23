@@ -53,7 +53,9 @@ ALTER TABLE gps_positions
 
 ALTER TABLE vehicles
   ADD COLUMN IF NOT EXISTS current_fuel_level_pct NUMERIC(5,2),
-  ADD COLUMN IF NOT EXISTS current_engine_hours NUMERIC(12,2);
+  ADD COLUMN IF NOT EXISTS current_engine_hours NUMERIC(12,2),
+  -- Offline watchdog: wall-clock time of the most recent successful ingest.
+  ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 
 -- Idempotent ingest: at most one position per device per timestamp
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gps_positions_imei_time
@@ -89,12 +91,28 @@ CREATE TABLE IF NOT EXISTS device_commands (
   vehicle_id UUID REFERENCES vehicles(id),
   command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
   payload_json JSONB,
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+  -- queued -> sent -> acknowledged, or failed. 'acked' is retained as a legacy
+  -- synonym so pre-existing rows/readers keep working.
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
   requested_by UUID REFERENCES users(id),
+  -- Operator-supplied justification (required for an ignition cut).
+  reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   sent_at TIMESTAMPTZ,
-  response_text TEXT
+  response_text TEXT,
+  -- Set when the tracker acknowledges the command (Codec 12 reply).
+  acked_at TIMESTAMPTZ
 );
+
+-- reason / acked_at + the 'acknowledged' status were added after the first
+-- release of this table.
+ALTER TABLE device_commands
+  ADD COLUMN IF NOT EXISTS reason TEXT,
+  ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ;
+
+ALTER TABLE device_commands DROP CONSTRAINT IF EXISTS device_commands_status_check;
+ALTER TABLE device_commands ADD CONSTRAINT device_commands_status_check
+  CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed'));
 
 -- ------------------------------------------------------------------ --
 -- Configurable IO-ID -> feature mapping + Teltonika parameter map
@@ -155,6 +173,10 @@ CREATE INDEX IF NOT EXISTS idx_device_commands_status ON device_commands(status)
 INSERT INTO io_feature_map (io_id, feature_key, label, value_type, scale_factor) VALUES
   (12,  'fuel_counter',      'GNSS Fuel Counter (primary)',        'scalar',  0.001),
   (13,  'fuel_counter',      'GNSS Fuel Counter (secondary)',      'scalar',  0.001),
+  (16,  'odometer',          'Odometer',                           'scalar',  0.001),
+  (66,  'external_voltage',  'External Voltage',                   'scalar',  0.001),
+  (67,  'internal_battery',  'Internal Battery',                   'scalar',  0.001),
+  (240, 'movement',          'Movement',                           'boolean', 1),
   (255, 'overspeed',         'Overspeeding',                       'event',   1),
   (253, 'eco_accel',         'Eco Driving — Harsh Acceleration',   'event',   1),
   (254, 'eco_brake',         'Eco Driving — Harsh Braking',        'event',   1),
