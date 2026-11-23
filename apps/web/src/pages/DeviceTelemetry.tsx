@@ -42,6 +42,28 @@ function featureValue(f: IoFeature): string {
   return String(f.value);
 }
 
+/** Renders the Teltonika command string a stored command dispatches, from its
+ *  persisted payload. Mirrors the API's serializeCommand(). */
+function serializedCommand(payloadJson: string): string {
+  if (!payloadJson) return "—";
+  try {
+    const c = JSON.parse(payloadJson);
+    switch (c.type) {
+      case "setparam":
+        return `setparam ${c.param_id}:${c.value}`;
+      case "setdigout":
+        return c.timeout !== undefined && c.timeout !== null ? `setdigout ${c.dout} ${c.timeout}` : `setdigout ${c.dout}`;
+      case "diagnostic":
+      case "raw":
+        return String(c.command);
+      default:
+        return payloadJson;
+    }
+  } catch {
+    return payloadJson;
+  }
+}
+
 export default function DeviceTelemetry() {
   const { imei } = useParams<{ imei: string }>();
   const { user } = useAuth();
@@ -56,6 +78,9 @@ export default function DeviceTelemetry() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  // Pending immobilizer action awaiting explicit confirmation.
+  const [confirmDigout, setConfirmDigout] = useState<0 | 1 | null>(null);
+  const [confirmChecked, setConfirmChecked] = useState(false);
 
   const load = useCallback(async () => {
     if (!imei) return;
@@ -115,7 +140,27 @@ export default function DeviceTelemetry() {
     await issue({ imei, type: "setdigout", params: { dout } });
   }
 
-  async function issue(body: { imei: string; type: "setparam" | "setdigout" | "raw"; params?: Record<string, string | number | boolean> }) {
+  /** Opens the confirmation modal for an immobilizer action (no dispatch yet). */
+  function requestDigout(dout: 0 | 1) {
+    setConfirmChecked(false);
+    setConfirmDigout(dout);
+  }
+
+  /** Dispatches the immobilizer action once the operator has confirmed. */
+  async function confirmDigoutAction() {
+    if (confirmDigout === null) return;
+    const dout = confirmDigout;
+    setConfirmDigout(null);
+    await sendDigout(dout);
+  }
+
+  /** Read-only status command (getinfo / getgps / getver). */
+  async function sendDiagnostic(command: "getinfo" | "getgps" | "getver") {
+    if (!imei) return;
+    await issue({ imei, type: "diagnostic", params: { command } });
+  }
+
+  async function issue(body: { imei: string; type: "setparam" | "setdigout" | "diagnostic" | "raw"; params?: Record<string, string | number | boolean> }) {
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -175,6 +220,15 @@ export default function DeviceTelemetry() {
   }
 
   const live = device.live;
+
+  // Current immobilizer-relevant state, decoded from the latest IO payload:
+  // IO 239 = ignition state, IO 179 = DOUT1 / immobilizer output.
+  const ignitionFeature = device.features.find((f) => f.io_id === 239);
+  const doutFeature =
+    device.features.find((f) => f.io_id === 179 && f.feature_key === "immobilizer") ??
+    device.features.find((f) => f.io_id === 179);
+  const ignitionOn = live?.ignition === 1 || ignitionFeature?.value === 1;
+  const doutEngaged = doutFeature?.value === 1;
 
   return (
     <div className="space-y-6">
@@ -345,14 +399,57 @@ export default function DeviceTelemetry() {
               ))}
             </div>
 
-            <div className="border-t border-base-800 pt-4 space-y-2">
-              <div className="text-xs font-semibold text-ink-100">Immobilizer / DOUT1</div>
-              <div className="flex gap-2">
-                <button onClick={() => sendDigout(1)} disabled={busy} className="btn-amber text-xs px-4 py-2">
-                  Engage (DOUT=1)
+            <div className="border-t border-base-800 pt-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="text-xs font-semibold text-ink-100">Remote Ignition Shutdown / Restore</div>
+                <div className="flex items-center gap-4 text-[11px]">
+                  <span className="text-ink-500">
+                    Ignition:{" "}
+                    <span className={ignitionOn ? "text-signal-green font-semibold" : "text-ink-300 font-semibold"}>
+                      {live || ignitionFeature ? (ignitionOn ? "ON" : "OFF") : "—"}
+                    </span>
+                  </span>
+                  <span className="text-ink-500">
+                    Immobilizer (DOUT1):{" "}
+                    <span className={doutEngaged ? "text-signal-red font-semibold" : "text-ink-300 font-semibold"}>
+                      {doutFeature ? (doutEngaged ? "CUT / ENGAGED" : "RELEASED") : "—"}
+                    </span>
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] text-ink-500">
+                Cutting the ignition immobilizes the vehicle via DOUT1. Both actions require explicit confirmation
+                before the command is queued.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => requestDigout(1)}
+                  disabled={busy}
+                  className="bg-signal-red/20 hover:bg-signal-red/30 text-signal-red font-semibold px-4 py-2 rounded-md transition-colors text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Cut Ignition (Immobilize)
                 </button>
-                <button onClick={() => sendDigout(0)} disabled={busy} className="btn-secondary text-xs px-4 py-2">
-                  Release (DOUT=0)
+                <button onClick={() => requestDigout(0)} disabled={busy} className="btn-secondary text-xs px-4 py-2">
+                  Restore Ignition
+                </button>
+              </div>
+            </div>
+
+            <div className="border-t border-base-800 pt-4 space-y-2">
+              <div className="text-xs font-semibold text-ink-100">Diagnostics</div>
+              <p className="text-[11px] text-ink-500">
+                Read-only status requests; the tracker replies on its next TCP sync and the result appears in the
+                command history below.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => sendDiagnostic("getinfo")} disabled={busy} className="btn-secondary text-xs px-4 py-2">
+                  Get Info
+                </button>
+                <button onClick={() => sendDiagnostic("getgps")} disabled={busy} className="btn-secondary text-xs px-4 py-2">
+                  Get GPS
+                </button>
+                <button onClick={() => sendDiagnostic("getver")} disabled={busy} className="btn-secondary text-xs px-4 py-2">
+                  Get Version
                 </button>
               </div>
             </div>
@@ -366,7 +463,7 @@ export default function DeviceTelemetry() {
                   <tr>
                     <th>When</th>
                     <th>Type</th>
-                    <th>Payload</th>
+                    <th>Command</th>
                     <th>Status</th>
                     <th>Response</th>
                     <th></th>
@@ -382,7 +479,9 @@ export default function DeviceTelemetry() {
                       <tr key={c.id}>
                         <td className="text-xs text-ink-400 whitespace-nowrap">{fmtDate(c.created_at)}</td>
                         <td className="text-xs capitalize text-ink-200">{c.command_type}</td>
-                        <td className="text-[11px] font-mono text-ink-400 max-w-xs truncate">{c.payload_json}</td>
+                        <td className="text-[11px] font-mono text-amber-400 max-w-xs truncate" title={c.payload_json}>
+                          {serializedCommand(c.payload_json)}
+                        </td>
                         <td>
                           <span className={`pill ${STATUS_STYLES[c.status] || "bg-base-600 text-ink-300"} capitalize`}>{c.status}</span>
                         </td>
@@ -402,6 +501,72 @@ export default function DeviceTelemetry() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Immobilizer confirmation — required before any ignition cut/restore */}
+      {confirmDigout !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
+          <div className="panel w-full max-w-md p-5 space-y-4">
+            <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">
+              {confirmDigout === 1 ? "Confirm Ignition Cut (Immobilize)" : "Confirm Ignition Restore"}
+            </h3>
+            <div className="text-xs space-y-3 text-ink-200">
+              <div className="space-y-1">
+                <div>
+                  Vehicle:{" "}
+                  <span className="font-semibold text-ink-100">
+                    {device.vehicle_number} ({device.registration_number})
+                  </span>
+                </div>
+                <div>
+                  IMEI: <span className="font-mono">{device.imei}</span>
+                </div>
+                <div>
+                  Command to send: <span className="font-mono text-amber-400">setdigout {confirmDigout}</span>
+                </div>
+              </div>
+              {confirmDigout === 1 ? (
+                <div className="p-3 rounded bg-signal-red/10 text-signal-red">
+                  Warning: cutting the ignition immobilizes this vehicle. It will not start until the ignition is
+                  restored. Only proceed if the vehicle is stationary and it is safe and authorised to do so.
+                </div>
+              ) : (
+                <div className="p-3 rounded bg-amber-400/10 text-amber-400">
+                  This restores the ignition and allows the vehicle to start again.
+                </div>
+              )}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={confirmChecked}
+                  onChange={(e) => setConfirmChecked(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  {confirmDigout === 1
+                    ? "I understand this will immobilize the vehicle and confirm I am authorised to issue this command."
+                    : "I confirm I want to restore this vehicle's ignition."}
+                </span>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmDigout(null)} className="btn-secondary text-xs px-4 py-2">
+                Cancel
+              </button>
+              <button
+                onClick={confirmDigoutAction}
+                disabled={!confirmChecked || busy}
+                className={
+                  confirmDigout === 1
+                    ? "bg-signal-red hover:bg-signal-red/80 text-white font-semibold px-4 py-2 rounded-md transition-colors text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                    : "btn-primary text-xs px-4 py-2"
+                }
+              >
+                Issue Command
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

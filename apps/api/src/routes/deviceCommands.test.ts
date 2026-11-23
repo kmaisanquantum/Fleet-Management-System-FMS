@@ -266,6 +266,81 @@ describe("Device commands router", () => {
     expect(body.data.response_text).toMatch(/unreachable/i);
   });
 
+  /* ------------------------- immobilizer audit ---------------------- */
+
+  it("audits ignition cut as IGNITION_CUT_QUEUED with the serialized command", async () => {
+    stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 1 } }, adminToken);
+    expect(status).toBe(201);
+
+    const audit = db
+      .prepare("SELECT * FROM audit_logs WHERE action = 'IGNITION_CUT_QUEUED' AND entity_id = ?")
+      .get(body.data.id) as any;
+    expect(audit).toBeDefined();
+    const newValue = JSON.parse(audit.new_value);
+    expect(newValue.imei).toBe(imeiA);
+    expect(newValue.vehicle_id).toBe(vehicleAId);
+    expect(newValue.command).toBe("setdigout 1");
+
+    // Only the immobilizer action is written for this row, not the generic one.
+    const generic = db
+      .prepare("SELECT * FROM audit_logs WHERE action = 'DEVICE_COMMAND_QUEUED' AND entity_id = ?")
+      .get(body.data.id);
+    expect(generic).toBeUndefined();
+  });
+
+  it("audits ignition restore as IGNITION_RESTORE_QUEUED", async () => {
+    stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 0 } }, adminToken);
+    expect(status).toBe(201);
+
+    const audit = db
+      .prepare("SELECT * FROM audit_logs WHERE action = 'IGNITION_RESTORE_QUEUED' AND entity_id = ?")
+      .get(body.data.id) as any;
+    expect(audit).toBeDefined();
+    expect(JSON.parse(audit.new_value).command).toBe("setdigout 0");
+  });
+
+  it("serializes an optional setdigout timeout (setdigout <dout> <timeout>)", async () => {
+    const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status } = await post(
+      "/",
+      { imei: imeiA, type: "setdigout", params: { dout: 1, timeout: 30 } },
+      adminToken
+    );
+    expect(status).toBe(201);
+    const sent = JSON.parse((relay.mock.calls[0][1] as any).body);
+    expect(sent.command).toBe("setdigout 1 30");
+  });
+
+  /* ------------------------- diagnostic type ------------------------ */
+
+  it("queues a whitelisted diagnostic command and audits DEVICE_COMMAND_QUEUED", async () => {
+    const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post(
+      "/",
+      { imei: imeiA, type: "diagnostic", params: { command: "getgps" } },
+      adminToken
+    );
+    expect(status).toBe(201);
+    expect(body.data.command_type).toBe("diagnostic");
+    expect(JSON.parse((relay.mock.calls[0][1] as any).body).command).toBe("getgps");
+    const audit = db
+      .prepare("SELECT * FROM audit_logs WHERE action = 'DEVICE_COMMAND_QUEUED' AND entity_id = ?")
+      .get(body.data.id);
+    expect(audit).toBeDefined();
+  });
+
+  it("rejects a non-whitelisted diagnostic command", async () => {
+    const { status, body } = await post(
+      "/",
+      { imei: imeiA, type: "diagnostic", params: { command: "reboot" } },
+      adminToken
+    );
+    expect(status).toBe(400);
+    expect(body.details).toMatch(/diagnostic/i);
+  });
+
   /* ----------------------- history + cancel ------------------------- */
 
   it("returns tenant-scoped command history", async () => {
@@ -310,6 +385,18 @@ describe("Device commands router", () => {
     expect(again.status).toBe(409);
   });
 
+  it("forbids the client_user role from cancelling a command", async () => {
+    const queuedId = uuid();
+    db.prepare(`
+      INSERT INTO device_commands (id, imei, vehicle_id, command_type, payload_json, status, requested_by)
+      VALUES (?, ?, ?, 'setdigout', ?, 'queued', NULL)
+    `).run(queuedId, imeiA, vehicleAId, JSON.stringify({ type: "setdigout", dout: 1 }));
+
+    const { status, body } = await post(`/${queuedId}/cancel`, {}, clientAToken);
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/role/i);
+  });
+
   /* -------------------------- pure logic ---------------------------- */
 
   it("builds Codec-12 commands from validated parameters", () => {
@@ -321,9 +408,31 @@ describe("Device commands router", () => {
     expect(buildCommand("raw", { command: "getinfo" })).toEqual({ command: { type: "raw", command: "getinfo" } });
   });
 
+  it("accepts an optional non-negative integer setdigout timeout", () => {
+    expect(buildCommand("setdigout", { dout: 1, timeout: 30 })).toEqual({ command: { type: "setdigout", dout: 1, timeout: 30 } });
+    expect(buildCommand("setdigout", { dout: 1, timeout: 0 })).toEqual({ command: { type: "setdigout", dout: 1, timeout: 0 } });
+    // Backward compatible: no timeout -> bare form.
+    expect(buildCommand("setdigout", { dout: 0 })).toEqual({ command: { type: "setdigout", dout: 0 } });
+    // Invalid timeouts are rejected.
+    expect(buildCommand("setdigout", { dout: 1, timeout: -1 }).error).toBeTruthy();
+    expect(buildCommand("setdigout", { dout: 1, timeout: 1.5 }).error).toBeTruthy();
+  });
+
+  it("only allows whitelisted diagnostic commands", () => {
+    for (const cmd of ["getinfo", "getgps", "getver", "getstatus"]) {
+      expect(buildCommand("diagnostic", { command: cmd })).toEqual({ command: { type: "diagnostic", command: cmd } });
+    }
+    expect(buildCommand("diagnostic", { command: "reboot" }).error).toBeTruthy();
+    expect(buildCommand("diagnostic", { command: "setparam 1580:80" }).error).toBeTruthy();
+    expect(buildCommand("diagnostic", {}).error).toBeTruthy();
+  });
+
   it("serializes built commands into Teltonika command strings", () => {
     expect(serializeCommand({ type: "setparam", param_id: 1580, value: 80 })).toBe("setparam 1580:80");
     expect(serializeCommand({ type: "setdigout", dout: 1 })).toBe("setdigout 1");
+    expect(serializeCommand({ type: "setdigout", dout: 1, timeout: 30 })).toBe("setdigout 1 30");
+    expect(serializeCommand({ type: "setdigout", dout: 0 })).toBe("setdigout 0");
+    expect(serializeCommand({ type: "diagnostic", command: "getver" })).toBe("getver");
     expect(serializeCommand({ type: "raw", command: "getinfo" })).toBe("getinfo");
   });
 });

@@ -141,7 +141,7 @@ function migrateExistingDatabase() {
     id TEXT PRIMARY KEY,
     imei TEXT NOT NULL,
     vehicle_id TEXT REFERENCES vehicles(id),
-    command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'raw')),
+    command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
     payload_json TEXT,
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
     requested_by TEXT REFERENCES users(id),
@@ -181,6 +181,7 @@ function migrateExistingDatabase() {
     ('iof-crash',           247, 'crash',             'Crash Detection',                  'event',   1),
     ('iof-geofence-auto',   175, 'geofence_auto',     'Auto / Manual Geofence',           'event',   1),
     ('iof-geofence-zone',   174, 'geofence_zone',     'Geofence Zone Event (IO 155-174)', 'event',   1),
+    ('iof-ignition',        239, 'ignition',          'Ignition State',                   'boolean', 1),
     ('iof-immobilizer',     179, 'immobilizer',       'DOUT1 / Immobilizer',              'boolean', 1),
     ('iof-dout-ignition',   179, 'dout_ignition',     'DOUT Driven by Ignition',          'boolean', 1),
     ('iof-jamming',         249, 'jamming',           'Network Jamming',                  'event',   1),
@@ -241,6 +242,24 @@ function migrateExistingDatabase() {
       resolution TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
+    );`
+  );
+
+  // Device commands gained a 'diagnostic' type (read-only getinfo/getgps/...).
+  rebuildIfCheckMissing(
+    "device_commands",
+    "diagnostic",
+    `CREATE TABLE device_commands (
+      id TEXT PRIMARY KEY,
+      imei TEXT NOT NULL,
+      vehicle_id TEXT REFERENCES vehicles(id),
+      command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw')),
+      payload_json TEXT,
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'failed')),
+      requested_by TEXT REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sent_at TEXT,
+      response_text TEXT
     );`
   );
 }

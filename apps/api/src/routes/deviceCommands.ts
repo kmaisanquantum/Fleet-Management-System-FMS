@@ -22,9 +22,15 @@ router.use(requireAuth);
 /** Roles permitted to dispatch device commands (client-role users are excluded). */
 const COMMAND_ROLES = ["admin", "fleet_manager"];
 
+/**
+ * Read-only status commands the FMB125 accepts. Only these exact strings may be
+ * issued through the `diagnostic` type; arbitrary strings must go through `raw`.
+ */
+const DIAGNOSTIC_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus"]);
+
 const commandSchema = z.object({
   imei: z.string().min(1),
-  type: z.enum(["setparam", "setdigout", "raw"]),
+  type: z.enum(["setparam", "setdigout", "diagnostic", "raw"]),
   params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().default({}),
 });
 
@@ -36,9 +42,13 @@ export interface BuiltCommand {
 /**
  * Builds the concrete Codec-12 command from a validated request. `setparam`
  * requires a parameter resolvable through `param_map` (by `param_id` or
- * `feature_key`); `setdigout` requires a 0/1 DOUT state.
+ * `feature_key`); `setdigout` requires a 0/1 DOUT state (with an optional
+ * non-negative `timeout`); `diagnostic` requires a whitelisted status command.
  */
-export function buildCommand(type: "setparam" | "setdigout" | "raw", params: Record<string, string | number | boolean>): BuiltCommand {
+export function buildCommand(
+  type: "setparam" | "setdigout" | "diagnostic" | "raw",
+  params: Record<string, string | number | boolean>
+): BuiltCommand {
   if (type === "setparam") {
     let paramId = typeof params.param_id === "number" ? params.param_id : undefined;
     if (paramId === undefined && typeof params.feature_key === "string") {
@@ -55,7 +65,23 @@ export function buildCommand(type: "setparam" | "setdigout" | "raw", params: Rec
     if (raw === undefined) return { error: "setdigout requires 'dout' (0 or 1)" };
     const dout = Number(raw);
     if (dout !== 0 && dout !== 1) return { error: "setdigout 'dout' must be 0 or 1" };
-    return { command: { type: "setdigout", dout } };
+    const command: Record<string, unknown> = { type: "setdigout", dout };
+    // Optional DOUT pulse timeout (milliseconds). Absent → the backward-
+    // compatible `setdigout <dout>` form; present → `setdigout <dout> <timeout>`.
+    if (params.timeout !== undefined && params.timeout !== null && params.timeout !== "") {
+      const timeout = Number(params.timeout);
+      if (!Number.isInteger(timeout) || timeout < 0) return { error: "setdigout 'timeout' must be a non-negative integer" };
+      command.timeout = timeout;
+    }
+    return { command };
+  }
+
+  if (type === "diagnostic") {
+    const cmd = params.command;
+    if (typeof cmd !== "string" || !DIAGNOSTIC_COMMANDS.has(cmd)) {
+      return { error: `diagnostic requires a 'command' of: ${[...DIAGNOSTIC_COMMANDS].join(", ")}` };
+    }
+    return { command: { type: "diagnostic", command: cmd } };
   }
 
   if (typeof params.command !== "string" || !params.command) return { error: "raw requires a 'command' string" };
@@ -64,14 +90,18 @@ export function buildCommand(type: "setparam" | "setdigout" | "raw", params: Rec
 
 /**
  * Serializes a built command into the Teltonika command string the VPS
- * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1`).
+ * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1`,
+ * `setdigout 1 30000`, `getgps`).
  */
 export function serializeCommand(command: Record<string, unknown>): string {
   switch (command.type) {
     case "setparam":
       return `setparam ${command.param_id}:${command.value}`;
     case "setdigout":
-      return `setdigout ${command.dout}`;
+      return command.timeout !== undefined && command.timeout !== null
+        ? `setdigout ${command.dout} ${command.timeout}`
+        : `setdigout ${command.dout}`;
+    case "diagnostic":
     case "raw":
       return String(command.command);
     default:
@@ -134,12 +164,20 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
       VALUES (?, ?, ?, ?, ?, 'queued', ?)
     `).run(id, imei, device.vehicle_id, type, JSON.stringify(built.command), req.user!.id);
 
+    const serialized = serializeCommand(built.command);
+
+    // Immobilizer events get a distinct audit action so ignition cut/restore is
+    // auditable on its own; every other command keeps DEVICE_COMMAND_QUEUED.
+    const auditAction = type === "setdigout"
+      ? (built.command.dout === 1 ? "IGNITION_CUT_QUEUED" : "IGNITION_RESTORE_QUEUED")
+      : "DEVICE_COMMAND_QUEUED";
+
     writeAudit({
       userId: req.user!.id,
-      action: "DEVICE_COMMAND_QUEUED",
+      action: auditAction,
       entity: "device_commands",
       entityId: id,
-      newValue: { imei, type, params },
+      newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, type, params },
     });
 
     // Forward to the MeshSat VPS command endpoint. A 2xx means the command was
@@ -149,7 +187,7 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
     let sentAt: string | null = null;
     let responseText: string | null = null;
     try {
-      const result = await forwardCommand(imei, serializeCommand(built.command));
+      const result = await forwardCommand(imei, serialized);
       responseText = (result.text || "").slice(0, 1000) || null;
       if (result.ok) {
         status = "sent";

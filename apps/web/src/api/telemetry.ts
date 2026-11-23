@@ -116,7 +116,7 @@ export const telemetryApi = {
   features: (imei: string) => getJson<{ data: DeviceFeatures }>(`/features/${encodeURIComponent(imei)}`),
 
   commands: {
-    issue: (body: { imei: string; type: "setparam" | "setdigout" | "raw"; params?: Record<string, string | number | boolean> }) =>
+    issue: (body: { imei: string; type: "setparam" | "setdigout" | "diagnostic" | "raw"; params?: Record<string, string | number | boolean> }) =>
       postJson<{ data: DeviceCommand; message: string }>("/commands", body),
     list: (imei?: string) =>
       getJson<{ data: DeviceCommand[] }>(`/commands${imei ? `?imei=${encodeURIComponent(imei)}` : ""}`),
@@ -170,7 +170,7 @@ export interface DeviceCommand {
   id: string;
   imei: string;
   vehicle_id: string | null;
-  command_type: "setparam" | "setdigout" | "raw";
+  command_type: "setparam" | "setdigout" | "diagnostic" | "raw";
   payload_json: string;
   status: CommandStatus;
   requested_by: string | null;
