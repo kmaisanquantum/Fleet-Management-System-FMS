@@ -130,15 +130,13 @@ describe("MeshSat map proxy", () => {
     expect(body).toContain("url(/api/meshsat-map/bg.png)");
   });
 
-  it("leaves third-party absolute URLs untouched and rewrites MeshSat-relative ones", async () => {
+  it("leaves non-OSM third-party URLs untouched and rewrites MeshSat-relative ones", async () => {
     const html =
       '<!doctype html><html><head>' +
       '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>' +
       '<link href="//unpkg.com/leaflet.css">' +
       "</head><body>" +
-      '<img src="https://tile.openstreetmap.org/3/4/5.png">' +
-      '<img src="//tile.openstreetmap.org/3/4/5.png">' +
-      '<script>fetch("//tile.openstreetmap.org/3/4/5.png");</script>' +
+      '<script>fetch("//unpkg.com/data.json");</script>' +
       "<style>body{background:url(\"https://unpkg.com/bg.png\")}</style>" +
       '<img src="/tile.png">' +
       '<script src="https://meshsat.example.test/app.js"></script>' +
@@ -152,12 +150,10 @@ describe("MeshSat map proxy", () => {
     const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
     const body = await res.text();
 
-    // External origins (OSM tiles, unpkg assets) are fetched directly by the browser.
+    // External (non-OSM) origins are fetched directly by the browser.
     expect(body).toContain('src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"');
     expect(body).toContain('href="//unpkg.com/leaflet.css"');
-    expect(body).toContain('src="https://tile.openstreetmap.org/3/4/5.png"');
-    expect(body).toContain('src="//tile.openstreetmap.org/3/4/5.png"');
-    expect(body).toContain('fetch("//tile.openstreetmap.org/3/4/5.png")');
+    expect(body).toContain('fetch("//unpkg.com/data.json")');
     expect(body).toContain('url("https://unpkg.com/bg.png")');
     expect(body).not.toContain("/api/meshsat-map//");
 
@@ -165,6 +161,37 @@ describe("MeshSat map proxy", () => {
     expect(body).toContain('src="/api/meshsat-map/app.js"');
     expect(body).toContain('src="/api/meshsat-map/tile.png"');
     expect(body).toContain('fetch("/api/meshsat-map/api/positions")');
+  });
+
+  it("blanks OpenStreetMap tile templates and injects the FMS canvas background", async () => {
+    const transparent =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const html =
+      "<!doctype html><html><head><title>MeshSat</title></head><body>" +
+      '<script>L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{' +
+      "attribution:'&copy; <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors'});</script>" +
+      '<img src="https://a.tile.openstreetmap.org/3/4/5.png">' +
+      '<img src="https://unpkg.com/marker.png">' +
+      "</body></html>";
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    const body = await res.text();
+
+    // Both the {s}-template and the subdomain tile image are blanked.
+    expect(body).not.toContain("tile.openstreetmap.org");
+    expect(body.split(transparent)).toHaveLength(3); // two replacements + remainder
+    // Non-OSM assets and the OSM attribution link are left intact.
+    expect(body).toContain('src="https://unpkg.com/marker.png"');
+    expect(body).toContain("https://www.openstreetmap.org/copyright");
+    // The blank canvas is painted with the FMS theme background.
+    expect(body).toContain(".leaflet-container{background:#1A2438}");
+    // The injected style lands inside <head> without disturbing its content.
+    expect(body).toContain("<title>MeshSat</title>");
+    expect(body.indexOf(".leaflet-container")).toBeLessThan(body.indexOf("</head>"));
   });
 
   it("strips X-Frame-Options and the CSP frame-ancestors directive", async () => {

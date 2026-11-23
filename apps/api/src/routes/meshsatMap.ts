@@ -15,9 +15,11 @@ import { verifyAccessToken } from "../middleware/auth";
  * `/api/meshsat-map/api/positions` → `<MESHSAT_MAP_ORIGIN>/api/positions` (the
  * data endpoint the map's inline script polls). HTML responses have their
  * MeshSat-absolute and root-relative URLs rewritten to the proxy prefix, while
- * absolute URLs to *other* origins (e.g. `*.openstreetmap.org` tiles,
- * `unpkg.com`) are left untouched so the browser fetches them directly. Framing
- * headers are stripped so the page renders inside the FMS iframe.
+ * absolute URLs to *other* origins (e.g. `unpkg.com`) are left untouched so the
+ * browser fetches them directly. OpenStreetMap tile-URL templates are replaced
+ * with a transparent 1×1 PNG (OSM blocks proxied/embedded tile fetches) and the
+ * Leaflet canvas is painted with the FMS theme background. Framing headers are
+ * stripped so the page renders inside the FMS iframe.
  *
  * Note: absolute-URL WebSocket/SSE connections opened by the map's inline script
  * cannot be rewritten by an HTTP proxy — see MESHSAT_INTEGRATION.md §7 for the
@@ -34,6 +36,26 @@ const PROXY_PREFIX = "/api/meshsat-map";
  * than an anonymous one.
  */
 const PROXY_USER_AGENT = "FleetManagementSystem/1.0 (fleet.dspng.tech)";
+
+/** Transparent 1×1 PNG that stands in for every blocked OSM tile. */
+const TRANSPARENT_TILE_DATA_URI =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/**
+ * Matches an OpenStreetMap tile-URL template — `*.tile.openstreetmap.org` with
+ * any `{s}`/`{z}`/`{x}`/`{y}` placeholders, e.g.
+ * `https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png` (scheme optional, so
+ * protocol-relative `//a.tile.openstreetmap.org/...` is covered too).
+ */
+const OSM_TILE_URL = /(?:https?:)?\/\/[^"'\s()]*tile\.openstreetmap\.org\/[^"'\s()]*/gi;
+
+/**
+ * Injected into `<head>` so the now-blank Leaflet canvas matches the FMS dark
+ * theme (Tailwind `base-700`, `#1A2438`) instead of stark white. The OSM
+ * attribution control is deliberately left intact — only tile artwork is removed.
+ */
+const BLANK_TILES_STYLE =
+  '<style id="fms-meshsat-blank-tiles">.leaflet-container{background:#1A2438}</style>';
 
 /** Cookie that carries the FMS JWT for the map's same-origin sub-requests. */
 export const MAP_COOKIE_NAME = "fms_map_token";
@@ -136,11 +158,15 @@ export function sanitizeUpstreamHeaders(headers: Headers): Record<string, string
  * back through the proxy. Already-prefixed paths are left untouched.
  *
  * Absolute URLs to any *other* origin are deliberately preserved so the browser
- * fetches them directly — `*.openstreetmap.org` tiles, `unpkg.com` assets, and
- * other third-party hosts. Routing OSM tiles through the proxy would fetch them
- * server-side, which violates OSM's tile usage policy and makes OSM return its
- * "Access blocked" placeholder (HTTP 200). A protocol-relative `//host/...`
- * reference is an absolute third-party URL too, so it is left alone as well.
+ * fetches them directly — `unpkg.com` assets and other third-party hosts. A
+ * protocol-relative `//host/...` reference is an absolute third-party URL too,
+ * so it is left alone as well.
+ *
+ * OpenStreetMap is the one exception: it blocks tile fetches arriving through
+ * the proxy (serving its "Access blocked" placeholder with HTTP 200), which
+ * cannot be fixed from here. Every OSM tile-URL template is therefore replaced
+ * with a transparent 1×1 PNG so Leaflet renders a clean canvas, and the
+ * `.leaflet-container` is painted with the FMS theme background.
  */
 export function rewriteMeshSatUrls(html: string, origin: string): string {
   let out = html.split(origin).join(PROXY_PREFIX);
@@ -149,6 +175,15 @@ export function rewriteMeshSatUrls(html: string, origin: string): string {
   out = out.replace(/(src|href|action)=("|')\/(?!\/|api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
   out = out.replace(/fetch\((["'])\/(?!\/|api\/meshsat-map)/gi, `fetch($1${PROXY_PREFIX}/`);
   out = out.replace(/url\((["']?)\/(?!\/|api\/meshsat-map)/gi, `url($1${PROXY_PREFIX}/`);
+
+  // Blank blocked OSM tiles: replacing the template with a transparent PNG makes
+  // Leaflet load that 1×1 image for every cell, leaving markers/HUD over a clean
+  // canvas. The OSM attribution control is intentionally left visible.
+  out = out.replace(OSM_TILE_URL, TRANSPARENT_TILE_DATA_URI);
+
+  // Paint the blank Leaflet canvas with the FMS theme background.
+  out = out.replace(/<head([^>]*)>/i, (headTag) => `${headTag}${BLANK_TILES_STYLE}`);
+
   return out;
 }
 
