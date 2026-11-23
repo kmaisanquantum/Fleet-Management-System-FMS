@@ -481,25 +481,28 @@ A `201` with `alerts >= 1` confirms the record was stored and the overspeed IO e
 
 ## 9. Remote Configuration & Control (Teltonika Codec 12)
 
-FMS users with the `admin` or `fleet_manager` role can push remote config/control commands (`setparam`, `setdigout`, `diagnostic`, `raw`) to a tracker. The `client_user` role is read-only (403). Commands are **queued** in `device_commands` and POSTed to the **meshsat.dspng.space VPS command endpoint**, which queues them and delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+FMS users with the `admin` or `fleet_manager` role can push remote config/control commands (`setparam`, `setdigout`, `diagnostic`, `camreq`, `raw`) to a tracker. The `client_user` role is read-only (403). Commands are **queued** in `device_commands` and POSTed to the **meshsat.dspng.space VPS command endpoint**, which queues them and delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
 
 ### 9.0 Command types
 
 | `type` | `params` | Emitted command |
 |---|---|---|
 | `setparam` | `{ param_id \| feature_key, value }` | `setparam <paramId>:<value>` |
-| `setdigout` | `{ dout: 0\|1, timeout? }` | `setdigout <dout>` or `setdigout <dout> <timeout>` |
-| `diagnostic` | `{ command }` ∈ `getinfo`, `getgps`, `getver`, `getstatus` | the whitelisted string as-is |
+| `setdigout` | `{ dout: 0\|1, dout_index?, timeout? }` | `setdigout <dout> <index>` or `setdigout <dout> <index> <timeout>` |
+| `diagnostic` | `{ command }` ∈ `getinfo`, `getgps`, `getver`, `getstatus`, `readio` | the whitelisted string as-is |
+| `camreq` | `{ channel? }` | `camreq` or `camreq <channel>` |
 | `raw` | `{ command }` | the raw string as-is |
 
-* **Diagnostic** commands are read-only status requests (`getinfo`, `getgps`, `getver`, `getstatus`). Only those four exact strings are accepted — arbitrary strings are **rejected** by the `diagnostic` type; use `raw` for anything outside the whitelist. The tracker replies on its next TCP sync and the result is visible in the command history.
-* **`setdigout` timeout** is optional and, when supplied, must be a non-negative integer (the DOUT pulse duration); omitting it keeps the backward-compatible `setdigout <dout>` form.
+* **Diagnostic** commands are read-only status requests (`getinfo`, `getgps`, `getver`, `getstatus`, `readio`). Only those exact strings are accepted — arbitrary strings are **rejected** by the `diagnostic` type; use `raw` for anything outside the whitelist. The tracker replies on its next TCP sync and the result is visible in the command history.
+* **`setdigout` DOUT index** is optional and defaults to **1** (DOUT1 — the immobilizer relay). Supply `dout_index` to target another DOUT relay; the command is always emitted in the full `setdigout <dout> <index>` form.
+* **`setdigout` timeout** is optional and, when supplied, must be a non-negative integer (the DOUT pulse duration); it is appended as `setdigout <dout> <index> <timeout>`.
+* **`camreq`** requests a camera snapshot; an optional positive integer `channel` selects the camera (emitted `camreq` or `camreq <channel>`).
 * **Top-level `reason` / `force`.** The request body also accepts `reason` (string) and `force` (boolean) alongside `type`/`params`. `reason` is required for an ignition cut (`setdigout dout=1`) and is stored on the command + audit. `force: true` lets an **admin** override the moving-vehicle speed guard (see 9.0.1); it is ignored for non-admins.
 
 ### 9.0.1 Immobilizer flow (remote ignition cut / restore)
 
-* **Cut / immobilize:** `setdigout` with `dout=1` (`setdigout 1`) — drives DOUT1 to immobilize the vehicle.
-* **Restore:** `setdigout` with `dout=0` (`setdigout 0`) — releases DOUT1 so the vehicle can start again.
+* **Cut / immobilize:** `setdigout` with `dout=1` (`setdigout 1 1`) — drives DOUT1 to immobilize the vehicle.
+* **Restore:** `setdigout` with `dout=0` (`setdigout 0 1`) — releases DOUT1 so the vehicle can start again.
 * Both are routed through the dedicated **Remote Ignition Shutdown / Restore** panel in the device page, which displays the current **ignition state (IO 239)** and **DOUT/immobilizer state (IO 179)** decoded via `GET /api/telemetry/features/:imei`, and requires an explicit **confirmation modal** — showing the vehicle/IMEI, the exact command string to be sent, an immobilization warning, and a required **reason** field — before the command is queued. The confirmation checkbox must be ticked and a reason entered before the **Issue** button enables.
 * **Server-side speed guard (API-enforced).** An ignition cut (`dout=1`) is rejected with `400` when no non-empty `reason` is supplied. The API then reads the vehicle's latest reported speed (`telemetry_records.speed_kmh`, falling back to `gps_positions.speed`) and, when it exceeds **10 km/h**, refuses the cut with `409 { error: "Vehicle moving — ignition cut blocked", speed_kmh }`. The only bypass is an `admin` caller passing `force: true` (a `fleet_manager` cannot force); a forced cut is logged distinctly (see audit below). Restores (`dout=0`) are never speed-guarded.
 * **Audit:** ignition actions are recorded in `audit_logs` with distinct actions — `IGNITION_CUT_QUEUED` (`dout=1`), `IGNITION_RESTORE_QUEUED` (`dout=0`) — while every other command keeps `DEVICE_COMMAND_QUEUED`. A forced override additionally writes `IGNITION_CUT_FORCED` carrying `speed_kmh`, `reason` and `forced: true`. Each audit `newValue` carries `imei`, `vehicle_id`, the serialized `command`, and the `reason`.
@@ -550,7 +553,7 @@ The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/tele
 | POST | `/ack` | **Tracker-reply callback (VPS → FMS).** Auth: `Authorization: Bearer ${TELEMETRY_INGEST_TOKEN}` (the ingest token, **not** a user JWT). Body `{ imei, command \| cmd, response \| reply }`. Matches the most recent `status='sent'` row for that IMEI whose serialized command equals `command`/`cmd`, then sets `status='acknowledged'`, `response_text=<reply>`, `acked_at=now`. Returns `200 { data, message }`; `404` when no sent command matches. |
 | POST | `/:id/cancel` | Cancel a still-`queued` row. |
 
-The **ack contract** the VPS must implement: when the FMB125 responds to a queued command over its Codec 12 TCP session, the VPS POSTs the echoed command string and the tracker's reply to `POST https://fleet.dspng.tech/api/telemetry/commands/ack` with the `TELEMETRY_INGEST_TOKEN` bearer. The echoed `command`/`cmd` must match the exact serialized command string the FMS sent (`setparam <id>:<value>`, `setdigout <dout>`, etc.) so the row can be correlated. A successful ack surfaces in the device panel as the **Acknowledged** badge with the tracker's reply.
+The **ack contract** the VPS must implement: when the FMB125 responds to a queued command over its Codec 12 TCP session, the VPS POSTs the echoed command string and the tracker's reply to `POST https://fleet.dspng.tech/api/telemetry/commands/ack` with the `TELEMETRY_INGEST_TOKEN` bearer. The echoed `command`/`cmd` must match the exact serialized command string the FMS sent (`setparam <id>:<value>`, `setdigout <dout> <index>`, `camreq [<channel>]`, etc.) so the row can be correlated. A successful ack surfaces in the device panel as the **Acknowledged** badge with the tracker's reply.
 
 ### 9.3 Environment variables
 
@@ -575,7 +578,7 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
   -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 }, "reason": "Stolen vehicle recovery" }'
-# → relayed as "setdigout 1", audited IGNITION_CUT_QUEUED
+# → relayed as "setdigout 1 1", audited IGNITION_CUT_QUEUED
 # → 409 {"error":"Vehicle moving — ignition cut blocked","speed_kmh":45} if moving
 
 # Admin force-override of the moving-vehicle guard (audited IGNITION_CUT_FORCED)
@@ -589,9 +592,9 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
   -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 0 } }'
-# → relayed as "setdigout 0", audited IGNITION_RESTORE_QUEUED
+# → relayed as "setdigout 0 1", audited IGNITION_RESTORE_QUEUED
 
-# Optional DOUT pulse timeout (emits "setdigout 1 30")
+# Optional DOUT pulse timeout (emits "setdigout 1 1 30")
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
@@ -611,7 +614,7 @@ curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands/ack \
   -H "Authorization: Bearer $TELEMETRY_INGEST_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "imei": "354018115690145", "cmd": "setdigout 1", "reply": "OK" }'
+  -d '{ "imei": "354018115690145", "cmd": "setdigout 1 1", "reply": "OK" }'
 # → 200 {"data": {...}, "message": "Command acknowledged"}   (404 if no sent row matches)
 ```
 

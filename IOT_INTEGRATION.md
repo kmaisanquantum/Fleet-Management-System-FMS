@@ -78,31 +78,56 @@ The device's raw IO element map is decoded through a configurable
 `io_feature_map` (admin-editable via `GET/POST/PUT/DELETE /api/v1/settings/io-features`,
 surface in the Settings page). Each row has a `scale_factor` (default `1`)
 multiplied into the raw value for engineering-unit display and the fuel
-fallback. Defaults seeded on first run:
+fallback, a `device_model` scope (**`NULL` = all tracker models**), and a
+`unit` label. Defaults seeded on first run:
 
-| IO ID | Feature key | Label | Type | Scale factor |
-|---|---|---|---|---|
-| 12 | `fuel_counter` | GNSS Fuel Counter (primary) | scalar | `0.001` (ml → L) |
-| 13 | `fuel_counter` | GNSS Fuel Counter (secondary) | scalar | `0.001` (ml → L) |
-| 255 | `overspeed` | Overspeeding | event | 1 |
-| 253 | `eco_accel` | Eco Driving — Harsh Acceleration | event | 1 |
-| 254 | `eco_brake` | Eco Driving — Harsh Braking | event | 1 |
-| 251 | `idling` | Excessive Idling | event | 1 |
-| 252 | `power_unplug` | Power Unplug / Tamper | event | 1 |
-| 246 | `towing` | Towing Detected | event | 1 |
-| 247 | `crash` | Crash Detection | event | 1 |
-| 175 | `geofence_auto` | Auto / Manual Geofence | event | 1 |
-| 174 | `geofence_zone` | Geofence Zone Event (IO 155–174) | event | 1 |
-| 179 | `immobilizer` | DOUT1 / Immobilizer | boolean | 1 |
-| 179 | `dout_ignition` | DOUT Driven by Ignition | boolean | 1 |
-| 249 | `jamming` | Network Jamming | event | 1 |
-| 78 | `ibutton` | iButton / Driver ID Read | scalar | 1 |
+| IO ID | Feature key | Label | Type | Scale factor | Unit | Device model |
+|---|---|---|---|---|---|---|
+| 12 | `fuel_counter` | GNSS Fuel Counter (primary) | scalar | `0.001` (ml → L) | L | all (`NULL`) |
+| 13 | `fuel_counter` | GNSS Fuel Counter (secondary) | scalar | `0.001` (ml → L) | L | all (`NULL`) |
+| 16 | `odometer` | Total Odometer | scalar | `0.001` (m → km) | km | all (`NULL`) |
+| 66 | `external_voltage` | External (main) power voltage | scalar | `0.001` (mV → V) | V | all (`NULL`) |
+| 67 | `internal_battery` | Internal battery voltage | scalar | `0.001` (mV → V) | V | all (`NULL`) |
+| 78 | `ibutton` | iButton / Driver ID Read | scalar | 1 | — | all (`NULL`) |
+| 239 | `ignition` | Ignition | boolean | 1 | — | all (`NULL`) |
+| 240 | `movement` | Movement | boolean | 1 | — | all (`NULL`) |
+| 255 | `overspeed` | Overspeeding | event | 1 | — | all (`NULL`) |
+| 253 | `eco_accel` | Eco Driving — Harsh Acceleration | event | 1 | — | all (`NULL`) |
+| 254 | `eco_brake` | Eco Driving — Harsh Braking | event | 1 | — | all (`NULL`) |
+| 251 | `idling` | Excessive Idling | event | 1 | — | all (`NULL`) |
+| 252 | `power_unplug` | Power Unplug / Tamper | event | 1 | — | all (`NULL`) |
+| 246 | `towing` | Towing Detected | event | 1 | — | all (`NULL`) |
+| 247 | `crash` | Crash Detection | event | 1 | — | all (`NULL`) |
+| 175 | `geofence_auto` | Auto / Manual Geofence | event | 1 | — | all (`NULL`) |
+| 174 | `geofence_zone` | Geofence Zone Event (IO 155–174) | event | 1 | — | all (`NULL`) |
+| 179 | `immobilizer` | DOUT1 / Immobilizer | boolean | 1 | — | all (`NULL`) |
+| 179 | `dout_ignition` | DOUT Driven by Ignition | boolean | 1 | — | all (`NULL`) |
+| 249 | `jamming` | Network Jamming | event | 1 | — | all (`NULL`) |
 
 `GET /api/telemetry/features/:imei` returns each feature with its latest raw
 `value`, the row's `scale_factor`, and the scaled `scaled_value` (raw × factor)
 alongside recent telemetry events. Because the mapping lives in the database,
 changing the FMB125 Configurator IO assignment (or adding a new element) needs
-no code change — add/edit the row instead.
+no code change — add/edit the row instead; `device_model` lets a row apply to
+one tracker model only (`NULL` = all).
+
+### Device profiles & capabilities (`gps_devices`)
+
+Each `gps_devices` row carries a `device_model` (default `FMB125`) and a
+`capabilities` JSON blob — `{ has_fuel_rs232, has_can_j1939, has_ble_sensors,
+has_camera, dout_count }` — so the UI can render capability-driven panels. The
+seed binds both production IMEIs (`354018115690145`, `354018115694907`) as
+`FMB125` with `dout_count = 2`. `GET /api/telemetry/features/:imei` returns the
+parsed `device_model` and `capabilities`. `gps_devices.last_seen_at` tracks the
+last successful ingest per device.
+
+### Camera / media captures (`device_media`)
+
+Camera and sensor captures are recorded in `device_media` (trigger type, camera
+channel, media type, storage URL, capture time, metadata) keyed by device and
+resolved to the vehicle/client like telemetry. The relay posts them to
+`POST /api/telemetry/media` (Bearer ingest token) and the device panel's
+**Camera / Media** tab lists them via `GET /api/telemetry/media?imei=`.
 
 ### Parameter-ID map (`param_map`)
 
@@ -121,9 +146,13 @@ Defaults seeded on first run:
 ### Remote configuration & control (Codec 12)
 
 Users with an elevated role (`admin` or `fleet_manager`; `client_user` is
-read-only) can push Codec-12 commands (`setparam`, `setdigout`, `raw`) to a
-tracker through `POST /api/telemetry/commands`. Commands are queued in
-`device_commands` and POSTed to the MeshSat VPS command endpoint
+read-only) can push Codec-12 commands (`setparam`, `setdigout`, `diagnostic`,
+`camreq`, `raw`) to a tracker through `POST /api/telemetry/commands`. A
+`setdigout` targets a DOUT relay (`dout_index`, default 1) and optionally a
+pulse `timeout` — serialized as `setdigout <dout> <dout_index> [timeout]` — and
+`diagnostic` accepts the whitelist `getinfo` / `getgps` / `getver` / `getstatus`
+/ `readio`. Commands are queued in `device_commands` and POSTed to the MeshSat
+VPS command endpoint
 (`https://meshsat.dspng.space/api/cmd`, `Authorization: Bearer $MESHSAT_CMD_TOKEN`)
 for delivery over the tracker's next TCP session (5027).
 See `MESHSAT_INTEGRATION.md` section 9 for the command flow.

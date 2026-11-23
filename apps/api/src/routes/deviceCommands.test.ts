@@ -315,7 +315,8 @@ describe("Device commands router", () => {
     const newValue = JSON.parse(audit.new_value);
     expect(newValue.imei).toBe(imeiA);
     expect(newValue.vehicle_id).toBe(vehicleAId);
-    expect(newValue.command).toBe("setdigout 1");
+    // setdigout is serialized in the full `setdigout <dout> <index>` form (default DOUT 1).
+    expect(newValue.command).toBe("setdigout 1 1");
     // The operator-supplied justification is persisted on the row + the audit.
     expect(newValue.reason).toBe("audit cut test");
     const row = db.prepare("SELECT reason FROM device_commands WHERE id = ?").get(body.data.id) as any;
@@ -337,10 +338,10 @@ describe("Device commands router", () => {
       .prepare("SELECT * FROM audit_logs WHERE action = 'IGNITION_RESTORE_QUEUED' AND entity_id = ?")
       .get(body.data.id) as any;
     expect(audit).toBeDefined();
-    expect(JSON.parse(audit.new_value).command).toBe("setdigout 0");
+    expect(JSON.parse(audit.new_value).command).toBe("setdigout 0 1");
   });
 
-  it("serializes an optional setdigout timeout (setdigout <dout> <timeout>)", async () => {
+  it("serializes an optional setdigout timeout (setdigout <dout> <index> <timeout>)", async () => {
     const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
     const { status } = await post(
       "/",
@@ -349,7 +350,19 @@ describe("Device commands router", () => {
     );
     expect(status).toBe(201);
     const sent = JSON.parse((relay.mock.calls[0][1] as any).body);
-    expect(sent.command).toBe("setdigout 1 30");
+    expect(sent.command).toBe("setdigout 1 1 30");
+  });
+
+  it("targets a specific DOUT relay when dout_index is supplied", async () => {
+    const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status } = await post(
+      "/",
+      { imei: imeiA, type: "setdigout", params: { dout: 1, dout_index: 2 }, reason: "dout index test" },
+      adminToken
+    );
+    expect(status).toBe(201);
+    const sent = JSON.parse((relay.mock.calls[0][1] as any).body);
+    expect(sent.command).toBe("setdigout 1 2");
   });
 
   /* --------------------- ignition-cut safety guard ------------------ */
@@ -484,6 +497,30 @@ describe("Device commands router", () => {
     expect(body.details).toMatch(/diagnostic/i);
   });
 
+  it("queues a readio diagnostic command", async () => {
+    const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post(
+      "/",
+      { imei: imeiA, type: "diagnostic", params: { command: "readio" } },
+      adminToken
+    );
+    expect(status).toBe(201);
+    expect(JSON.parse((relay.mock.calls[0][1] as any).body).command).toBe("readio");
+    expect(body.data.command_type).toBe("diagnostic");
+  });
+
+  it("queues a camreq command with an optional channel", async () => {
+    const relay = stubRelay(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post(
+      "/",
+      { imei: imeiA, type: "camreq", params: { channel: 2 } },
+      adminToken
+    );
+    expect(status).toBe(201);
+    expect(body.data.command_type).toBe("camreq");
+    expect(JSON.parse((relay.mock.calls[0][1] as any).body).command).toBe("camreq 2");
+  });
+
   /* ----------------------- history + cancel ------------------------- */
 
   it("returns tenant-scoped command history", async () => {
@@ -562,8 +599,26 @@ describe("Device commands router", () => {
     expect(buildCommand("setdigout", { dout: 1, timeout: 1.5 }).error).toBeTruthy();
   });
 
+  it("accepts an optional positive integer setdigout dout_index", () => {
+    expect(buildCommand("setdigout", { dout: 1, dout_index: 2 })).toEqual({ command: { type: "setdigout", dout: 1, dout_index: 2 } });
+    // `index` is an accepted alias.
+    expect(buildCommand("setdigout", { dout: 0, index: 3 })).toEqual({ command: { type: "setdigout", dout: 0, dout_index: 3 } });
+    // Invalid indices are rejected.
+    expect(buildCommand("setdigout", { dout: 1, dout_index: 0 }).error).toBeTruthy();
+    expect(buildCommand("setdigout", { dout: 1, dout_index: -1 }).error).toBeTruthy();
+    expect(buildCommand("setdigout", { dout: 1, dout_index: 1.5 }).error).toBeTruthy();
+  });
+
+  it("builds a camreq command with an optional positive channel", () => {
+    expect(buildCommand("camreq", {})).toEqual({ command: { type: "camreq" } });
+    expect(buildCommand("camreq", { channel: 1 })).toEqual({ command: { type: "camreq", channel: 1 } });
+    expect(buildCommand("camreq", { camera_channel: 2 })).toEqual({ command: { type: "camreq", channel: 2 } });
+    expect(buildCommand("camreq", { channel: 0 }).error).toBeTruthy();
+    expect(buildCommand("camreq", { channel: 1.5 }).error).toBeTruthy();
+  });
+
   it("only allows whitelisted diagnostic commands", () => {
-    for (const cmd of ["getinfo", "getgps", "getver", "getstatus"]) {
+    for (const cmd of ["getinfo", "getgps", "getver", "getstatus", "readio"]) {
       expect(buildCommand("diagnostic", { command: cmd })).toEqual({ command: { type: "diagnostic", command: cmd } });
     }
     expect(buildCommand("diagnostic", { command: "reboot" }).error).toBeTruthy();
@@ -573,10 +628,15 @@ describe("Device commands router", () => {
 
   it("serializes built commands into Teltonika command strings", () => {
     expect(serializeCommand({ type: "setparam", param_id: 1580, value: 80 })).toBe("setparam 1580:80");
-    expect(serializeCommand({ type: "setdigout", dout: 1 })).toBe("setdigout 1");
-    expect(serializeCommand({ type: "setdigout", dout: 1, timeout: 30 })).toBe("setdigout 1 30");
-    expect(serializeCommand({ type: "setdigout", dout: 0 })).toBe("setdigout 0");
+    // setdigout emits the full `<dout> <index>` form (index defaults to 1).
+    expect(serializeCommand({ type: "setdigout", dout: 1 })).toBe("setdigout 1 1");
+    expect(serializeCommand({ type: "setdigout", dout: 1, dout_index: 2 })).toBe("setdigout 1 2");
+    expect(serializeCommand({ type: "setdigout", dout: 1, timeout: 30 })).toBe("setdigout 1 1 30");
+    expect(serializeCommand({ type: "setdigout", dout: 0 })).toBe("setdigout 0 1");
+    expect(serializeCommand({ type: "camreq" })).toBe("camreq");
+    expect(serializeCommand({ type: "camreq", channel: 2 })).toBe("camreq 2");
     expect(serializeCommand({ type: "diagnostic", command: "getver" })).toBe("getver");
+    expect(serializeCommand({ type: "diagnostic", command: "readio" })).toBe("readio");
     expect(serializeCommand({ type: "raw", command: "getinfo" })).toBe("getinfo");
   });
 });

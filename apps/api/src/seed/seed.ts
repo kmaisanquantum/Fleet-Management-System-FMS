@@ -3,7 +3,7 @@
  */
 import bcrypt from "bcryptjs";
 import { v4 as uuid } from "uuid";
-import { db, initSchema } from "../db";
+import { db, initSchema, FMB125_CAPABILITIES_JSON } from "../db";
 
 initSchema();
 
@@ -12,7 +12,7 @@ console.log("Seeding Fleet Management System & Intelligence data...");
 // Wipe existing data for clean seed
 const tables = [
   "business_rules", "fleet_exceptions", "driver_events", "geofences", "gps_positions",
-  "telemetry_records", "device_commands", "gps_devices", "vehicle_fuel_logs", "fuel_cards", "fuel_stations",
+  "telemetry_records", "device_media", "device_commands", "gps_devices", "vehicle_fuel_logs", "fuel_cards", "fuel_stations",
   "vehicle_disposals", "vehicle_accidents", "vehicle_breakdowns",
   "vehicle_maintenance", "vehicle_inspections", "vehicle_trips",
   "vehicle_allocations", "drivers", "vehicles", "audit_logs", "alerts",
@@ -292,9 +292,9 @@ const TELTONIKA_TRACKERS = [
 for (const t of TELTONIKA_TRACKERS) {
   const devId = uuid();
   db.prepare(`
-    INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status)
-    VALUES (?, ?, ?, 'teltonika', ?, 'active')
-  `).run(devId, t.vehicleId, t.imei, t.clientId);
+    INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, device_model, capabilities, client_id, status)
+    VALUES (?, ?, ?, 'teltonika', 'FMB125', ?, ?, 'active')
+  `).run(devId, t.vehicleId, t.imei, FMB125_CAPABILITIES_JSON, t.clientId);
   db.prepare("UPDATE vehicles SET gps_device_id = ? WHERE id = ?").run(devId, t.vehicleId);
 }
 
