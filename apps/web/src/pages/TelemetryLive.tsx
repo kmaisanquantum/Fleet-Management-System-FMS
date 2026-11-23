@@ -21,6 +21,11 @@ function fmt(value: number | null | undefined, suffix = ""): string {
   return `${value}${suffix}`;
 }
 
+function fmtTs(value: string | null | undefined): string {
+  if (!value) return "never";
+  return new Date(value.replace(" ", "T") + "Z").toLocaleString();
+}
+
 export default function TelemetryLive() {
   const { user } = useAuth();
   const [vehicles, setVehicles] = useState<TelemetryLatest[]>([]);
@@ -104,9 +109,19 @@ export default function TelemetryLive() {
                     {v.make} {v.model}
                   </div>
                 </div>
-                <span className={`badge ${statusClass(v.computed_status)} capitalize`}>
-                  {(v.computed_status || "unknown").replace(/_/g, " ")}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  {v.online === false && (
+                    <span
+                      className="badge bg-signal-red/15 text-signal-red"
+                      title={`Last seen ${fmtTs(v.last_seen_at)}`}
+                    >
+                      Offline
+                    </span>
+                  )}
+                  <span className={`badge ${statusClass(v.computed_status)} capitalize`}>
+                    {(v.computed_status || "unknown").replace(/_/g, " ")}
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3 text-xs">
@@ -138,8 +153,11 @@ export default function TelemetryLive() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between text-[11px] text-ink-500 border-t border-base-700 pt-3">
-                <span className="font-mono">IMEI {v.imei || "—"}</span>
+              <div className="flex items-center justify-between text-[11px] text-ink-500 border-t border-base-700 pt-3 gap-2">
+                <div className="flex flex-col gap-0.5">
+                  <span className="font-mono">IMEI {v.imei || "—"}</span>
+                  <span className={v.online === false ? "text-signal-red" : ""}>Last seen {fmtTs(v.last_seen_at)}</span>
+                </div>
                 {v.imei ? (
                   <Link to={`/telemetry/device/${v.imei}`} className="text-amber-400 hover:underline">
                     Device panel &rarr;

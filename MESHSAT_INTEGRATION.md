@@ -429,14 +429,19 @@ Truthy event-style IO elements are interpreted into `fleet_exceptions` rows; sca
 | 179 | Digital output / immobilizer (DOUT) | `immobilizer` | `RULE_IMMOBILIZER` (warning, security) |
 | 253 | Eco driving — harsh acceleration | `eco_driving` | `RULE_ECO_DRIVING` (info, driver) |
 | 254 | Eco driving — harsh braking | `eco_driving` | `RULE_ECO_DRIVING` (info, driver) |
-| 239 | Ignition | — | Position/live-state `ignition` |
-| 16 | Total odometer | — | Position/live-state `odometer` |
+| 239 | Ignition | — | Position/live-state `ignition`; feature grid `ignition` (boolean) |
+| 16 | Total odometer | — | Position/live-state `odometer`; feature grid `odometer`, scaled m→km (factor 0.001) |
 | 21 | GSM signal | — | Position/live-state `gsm_signal` |
+| 66 | External (main) power voltage | `power_unplug` | Feature grid `external_voltage`, scaled mV→V (factor 0.001). When present and below 1000 mV the tracker is running on internal battery → `RULE_MAIN_POWER_CUT` (critical, security, `type = power_unplug`) |
+| 67 | Internal battery voltage | — | Feature grid `internal_battery`, scaled mV→V (factor 0.001) |
+| 240 | Movement | — | Feature grid `movement` (boolean) |
 | 12 / 13 | Fuel counter (`feature_key='fuel_counter'`) | — | Raw value kept in `io_json` (also returned as `fuelCounter` on ingest); **scaled by the row's `scale_factor` to populate `fuel_liters`** when the fix has no explicit `fuel_liters` |
 
 **Fuel fallback.** When `fuel_liters` is null/absent, the ingest looks up the `io_feature_map` rows with `feature_key = 'fuel_counter'` (IO 12/13), reads the first present value from `io`, multiplies it by that row's configured `scale_factor` (seeded `0.001`, i.e. millilitres → litres) and stores the result as `fuel_liters`. This guarantees `fuel_liters` always holds litres — the raw counter is never written there. Operators can adjust or add fuel-counter rows (with their `scale_factor`) via `GET/POST/PUT/DELETE /api/v1/settings/io-features` if the device reports in a different unit.
 
-**Refuel / drain.** A change in absolute `fuel_liters` of at least **5 L** since the previous fix raises `RULE_REFUEL_DETECTED` (`type = refuel`, info, fuel) or `RULE_FUEL_DRAIN` (`type = fuel_drain`, warning, fuel).
+**Refuel / drain.** A change in absolute `fuel_liters` since the previous fix raises `RULE_REFUEL_DETECTED` (`type = refuel`, info, fuel) or `RULE_FUEL_DRAIN` (`type = fuel_drain`, warning, fuel). To filter sensor noise on rough roads the change must be at least the configured threshold: `FUEL_REFUEL_MIN_L` (default 5) for a rise, `FUEL_DRAIN_MIN_L` (default 5) for a fall; smaller swings are ignored. Both are read from the environment on each evaluation, so they can be tuned per deployment without a rebuild.
+
+**Offline watchdog.** Every successful ingest stamps `vehicles.last_seen_at`. `GET /api/telemetry/latest` and `GET /api/telemetry/features/:imei` return that timestamp plus a computed `online` boolean — `true` when the last ingest is within `DEVICE_OFFLINE_MINUTES` (default 15) — and the Vehicle Live Status / device panel pages show an "Offline" badge with the last-seen time when `online` is `false`.
 
 ### 8.4 Client-facing read & reporting endpoints
 
@@ -444,8 +449,8 @@ These are JWT-authenticated and scoped so that client-portal users (`client_user
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/telemetry/latest` | Latest position, ignition, speed, satellites and fuel per vehicle. |
-| GET | `/api/telemetry/features/:imei` | Decoded IO feature grid (via `io_feature_map`, each feature including `scale_factor` and the scaled `scaled_value`) + live state + recent telemetry events for one device. 403 outside the caller's client scope. |
+| GET | `/api/telemetry/latest` | Latest position, ignition, speed, satellites and fuel per vehicle, plus `last_seen_at` and the computed `online` boolean. |
+| GET | `/api/telemetry/features/:imei` | Decoded IO feature grid (via `io_feature_map`, each feature including `scale_factor` and the scaled `scaled_value`) + live state + `last_seen_at`/`online` + recent telemetry events for one device. 403 outside the caller's client scope. |
 | GET | `/api/telemetry/summary?from&to` | Fuel refuelled/consumed, distance, efficiency and the alert log over a range. |
 | GET | `/api/telemetry/export?format=csv&from&to` | CSV export of position history (max 20 000 rows). |
 
@@ -489,13 +494,15 @@ FMS users with the `admin` or `fleet_manager` role can push remote config/contro
 
 * **Diagnostic** commands are read-only status requests (`getinfo`, `getgps`, `getver`, `getstatus`). Only those four exact strings are accepted — arbitrary strings are **rejected** by the `diagnostic` type; use `raw` for anything outside the whitelist. The tracker replies on its next TCP sync and the result is visible in the command history.
 * **`setdigout` timeout** is optional and, when supplied, must be a non-negative integer (the DOUT pulse duration); omitting it keeps the backward-compatible `setdigout <dout>` form.
+* **Top-level `reason` / `force`.** The request body also accepts `reason` (string) and `force` (boolean) alongside `type`/`params`. `reason` is required for an ignition cut (`setdigout dout=1`) and is stored on the command + audit. `force: true` lets an **admin** override the moving-vehicle speed guard (see 9.0.1); it is ignored for non-admins.
 
 ### 9.0.1 Immobilizer flow (remote ignition cut / restore)
 
 * **Cut / immobilize:** `setdigout` with `dout=1` (`setdigout 1`) — drives DOUT1 to immobilize the vehicle.
 * **Restore:** `setdigout` with `dout=0` (`setdigout 0`) — releases DOUT1 so the vehicle can start again.
-* Both are routed through the dedicated **Remote Ignition Shutdown / Restore** panel in the device page, which displays the current **ignition state (IO 239)** and **DOUT/immobilizer state (IO 179)** decoded via `GET /api/telemetry/features/:imei`, and requires an explicit **confirmation modal** — showing the vehicle/IMEI, the exact command string to be sent, and an immobilization warning — before the command is queued. The confirmation checkbox must be ticked before the **Issue** button enables.
-* **Audit:** ignition actions are recorded in `audit_logs` with distinct actions — `IGNITION_CUT_QUEUED` (`dout=1`), `IGNITION_RESTORE_QUEUED` (`dout=0`) — while every other command keeps `DEVICE_COMMAND_QUEUED`. Each audit `newValue` carries `imei`, `vehicle_id` and the serialized `command`.
+* Both are routed through the dedicated **Remote Ignition Shutdown / Restore** panel in the device page, which displays the current **ignition state (IO 239)** and **DOUT/immobilizer state (IO 179)** decoded via `GET /api/telemetry/features/:imei`, and requires an explicit **confirmation modal** — showing the vehicle/IMEI, the exact command string to be sent, an immobilization warning, and a required **reason** field — before the command is queued. The confirmation checkbox must be ticked and a reason entered before the **Issue** button enables.
+* **Server-side speed guard (API-enforced).** An ignition cut (`dout=1`) is rejected with `400` when no non-empty `reason` is supplied. The API then reads the vehicle's latest reported speed (`telemetry_records.speed_kmh`, falling back to `gps_positions.speed`) and, when it exceeds **10 km/h**, refuses the cut with `409 { error: "Vehicle moving — ignition cut blocked", speed_kmh }`. The only bypass is an `admin` caller passing `force: true` (a `fleet_manager` cannot force); a forced cut is logged distinctly (see audit below). Restores (`dout=0`) are never speed-guarded.
+* **Audit:** ignition actions are recorded in `audit_logs` with distinct actions — `IGNITION_CUT_QUEUED` (`dout=1`), `IGNITION_RESTORE_QUEUED` (`dout=0`) — while every other command keeps `DEVICE_COMMAND_QUEUED`. A forced override additionally writes `IGNITION_CUT_FORCED` carrying `speed_kmh`, `reason` and `forced: true`. Each audit `newValue` carries `imei`, `vehicle_id`, the serialized `command`, and the `reason`.
 
 > The command queue lives on the **meshsat.dspng.space VPS** (its `/api/cmd` on `127.0.0.1:6051` → Codec 12 over TCP 5027). This repository's `services/meshsat-relay` only forwards telemetry; it does **not** host `/api/cmd`.
 
@@ -503,8 +510,9 @@ FMS users with the `admin` or `fleet_manager` role can push remote config/contro
 
 ```
    Web UI (device panel)
-        │  POST /api/telemetry/commands  {imei, type, params}
+        │  POST /api/telemetry/commands  {imei, type, params, reason?, force?}
         │  JWT: admin | fleet_manager        (client_user = 403)
+        │  dout=1 → reason required; speed > 10 km/h → 409 (admin force:true to override)
         ▼
    FMS api  ──► device_commands row (status = 'queued')  +  audit_logs
         │  POST https://meshsat.dspng.space/api/cmd   {"imei":"<15-digit>","command":"<teltonika-cmd>"}
@@ -514,11 +522,16 @@ FMS users with the `admin` or `fleet_manager` role can push remote config/contro
         │  enqueue per-IMEI; deliver on the tracker's next TCP session
         ▼
    FMB125 tracker  ──(Codec 12 over TCP 5027)──►  applies setparam / setdigout
-        │
-        ▼  (VPS accepts 2xx → FMS api marks the row 'sent'; later 'acked')
+        │  replies over Codec 12
+        ▼
+   meshsat.dspng.space VPS
+        │  POST /api/telemetry/commands/ack   {"imei":"<15-digit>","cmd":"<echoed-cmd>","reply":"<tracker-reply>"}
+        │  Authorization: Bearer ${TELEMETRY_INGEST_TOKEN}
+        ▼
+   FMS api  ──► device_commands row (status = 'acknowledged', response_text, acked_at)
 ```
 
-Status transitions: `queued` → `sent` → `acked`, or `failed`. A 2xx from the VPS sets `sent` + `sent_at`; a non-2xx response or an unreachable endpoint sets `failed` with the error in `response_text`.
+Status transitions: `queued` → `sent` → `acknowledged`, or `failed`. A 2xx from the VPS sets `sent` + `sent_at`; a non-2xx response or an unreachable endpoint sets `failed` with the error in `response_text`. The tracker's Codec 12 reply is reported back by the VPS to `POST /api/telemetry/commands/ack` (section 9.2), which flips the matching `sent` row to `acknowledged` and stores the reply in `response_text` with `acked_at` set. (`acked` remains a valid legacy status value; the current lifecycle uses `acknowledged`.)
 
 ### 9.2 Endpoints
 
@@ -534,7 +547,10 @@ The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/tele
 |---|---|---|
 | POST | `/` | Queue a command (see `API.md`). POSTed to `${MESHSAT_CMD_URL}/api/cmd` with `Authorization: Bearer`. |
 | GET | `/?imei=` | Tenant-scoped queue + delivery history. |
+| POST | `/ack` | **Tracker-reply callback (VPS → FMS).** Auth: `Authorization: Bearer ${TELEMETRY_INGEST_TOKEN}` (the ingest token, **not** a user JWT). Body `{ imei, command \| cmd, response \| reply }`. Matches the most recent `status='sent'` row for that IMEI whose serialized command equals `command`/`cmd`, then sets `status='acknowledged'`, `response_text=<reply>`, `acked_at=now`. Returns `200 { data, message }`; `404` when no sent command matches. |
 | POST | `/:id/cancel` | Cancel a still-`queued` row. |
+
+The **ack contract** the VPS must implement: when the FMB125 responds to a queued command over its Codec 12 TCP session, the VPS POSTs the echoed command string and the tracker's reply to `POST https://fleet.dspng.tech/api/telemetry/commands/ack` with the `TELEMETRY_INGEST_TOKEN` bearer. The echoed `command`/`cmd` must match the exact serialized command string the FMS sent (`setparam <id>:<value>`, `setdigout <dout>`, etc.) so the row can be correlated. A successful ack surfaces in the device panel as the **Acknowledged** badge with the tracker's reply.
 
 ### 9.3 Environment variables
 
@@ -544,17 +560,29 @@ The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/tele
 | `MESHSAT_CMD_TOKEN` | api | Secret sent as `Authorization: Bearer`. Set in **Coolify**; do not commit. |
 | `MESHSAT_MAP_ORIGIN` | api | MeshSat map origin for the Live Fleet Map URL (section 7); default `https://meshsat.dspng.space`. |
 | `MESHSAT_MAP_TOKEN` | api | Shared secret injected into the map URL as `?key=`. Set in **Coolify**; do not commit. |
-| `TELEMETRY_INGEST_TOKEN` | api + relay | Bearer token for the rich telemetry ingest (also used by the relay forward). |
+| `TELEMETRY_INGEST_TOKEN` | api + relay | Bearer token for the rich telemetry ingest (also used by the relay forward **and** the `/commands/ack` tracker-reply callback). |
+| `FUEL_REFUEL_MIN_L` | api | Minimum refuel rise (litres) before `RULE_REFUEL_DETECTED` fires; default `5`. Jitter filter. |
+| `FUEL_DRAIN_MIN_L` | api | Minimum fuel fall (litres) before `RULE_FUEL_DRAIN` fires; default `5`. Jitter filter. |
+| `DEVICE_OFFLINE_MINUTES` | api | Window (minutes) since `last_seen_at` before `online` flips to `false`; default `15`. |
 
 ### 9.4 Verification
 
 ```bash
-# Cut the ignition (immobilize) — replace <JWT> with a fleet_manager token
+# Cut the ignition (immobilize) — replace <JWT> with a fleet_manager token.
+# `reason` is REQUIRED for dout=1; the cut is refused (409) while the vehicle
+# moves faster than 10 km/h unless an admin passes force:true.
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
-  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 } }'
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 }, "reason": "Stolen vehicle recovery" }'
 # → relayed as "setdigout 1", audited IGNITION_CUT_QUEUED
+# → 409 {"error":"Vehicle moving — ignition cut blocked","speed_kmh":45} if moving
+
+# Admin force-override of the moving-vehicle guard (audited IGNITION_CUT_FORCED)
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 }, "reason": "Immediate immobilize — pursuit", "force": true }'
 
 # Restore the ignition
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
@@ -567,7 +595,7 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
-  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1, "timeout": 30 } }'
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1, "timeout": 30 }, "reason": "Pulse test" }'
 
 # Read-only diagnostic (getinfo | getgps | getver | getstatus)
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
@@ -578,9 +606,16 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
 # Inspect the queue + status history
 curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \
   -H "Authorization: Bearer <JWT>"
+
+# Tracker-reply callback (VPS → FMS): marks the matching sent row 'acknowledged'
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands/ack \
+  -H "Authorization: Bearer $TELEMETRY_INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "cmd": "setdigout 1", "reply": "OK" }'
+# → 200 {"data": {...}, "message": "Command acknowledged"}   (404 if no sent row matches)
 ```
 
-A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (VPS accepted for delivery) or `failed` (endpoint rejected/unreachable) confirms the command was persisted and dispatched.
+A `201` with `message: "Queued / Pending Next Tracker Sync"` and a `status` of `sent` (VPS accepted for delivery) or `failed` (endpoint rejected/unreachable) confirms the command was persisted and dispatched. Once the VPS reports the tracker's Codec 12 reply to `/commands/ack`, the row moves to `acknowledged` and the device panel shows the **Acknowledged** badge with the reply text.
 
 ---
 
@@ -594,11 +629,14 @@ Set these on the **api** service (Coolify → api → Environment Variables). Ge
 
 | Variable | Value | Notes |
 |---|---|---|
-| `TELEMETRY_INGEST_TOKEN` | `<secret>` | Bearer token for `POST /api/telemetry/ingest` (section 2.1). |
+| `TELEMETRY_INGEST_TOKEN` | `<secret>` | Bearer token for `POST /api/telemetry/ingest` (section 2.1) **and** the `POST /api/telemetry/commands/ack` tracker-reply callback (section 9.2). |
 | `MESHSAT_CMD_URL` | `https://meshsat.dspng.space` | VPS base URL for remote commands (section 9). |
 | `MESHSAT_CMD_TOKEN` | `<rotated>` | `Authorization: Bearer` for the VPS `/api/cmd`. |
 | `MESHSAT_MAP_ORIGIN` | `https://meshsat.dspng.space` | MeshSat map origin (section 7). |
 | `MESHSAT_MAP_AUTH` | `admin:<password>` | Basic credential the proxy injects server-side. |
+| `FUEL_REFUEL_MIN_L` | `5` | Minimum refuel rise (litres) before a refuel alert fires; jitter filter. Optional — defaults to `5`. |
+| `FUEL_DRAIN_MIN_L` | `5` | Minimum fuel fall (litres) before a drain alert fires; jitter filter. Optional — defaults to `5`. |
+| `DEVICE_OFFLINE_MINUTES` | `15` | Minutes without an ingest before a device is flagged **Offline**; optional — defaults to `15`. |
 
 **Web** build-time (Coolify → web → Environment Variables):
 
@@ -630,5 +668,6 @@ curl -X POST https://fleet.dspng.tech/api/telemetry/ingest \
 
 ### 10.4 Post-deploy hardening
 
+* **Ack endpoint (VPS side).** The `acknowledged` status only lights up once the **VPS** calls `POST /api/telemetry/commands/ack` with the tracker's Codec 12 reply (see section 9.2) using the `TELEMETRY_INGEST_TOKEN` bearer. Until the VPS implements that callback, commands will rest at `sent` (delivered) — they will still send/deliver correctly, they just won't show the **Acknowledged** badge with the tracker's response. Confirm the callback works end-to-end (issue a `diagnostic getgps`, watch the row reach `acknowledged`).
 * After the **first successful end-to-end test**, rotate `MESHSAT_CMD_TOKEN` **and** the MeshSat map password (`MESHSAT_MAP_AUTH`) — both were shared in plaintext during setup — and update the Coolify variables, then re-run the smoke test.
 

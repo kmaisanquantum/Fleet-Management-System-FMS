@@ -42,6 +42,10 @@ export interface TelemetryLatest {
   lon: number | null;
   fuel_level_pct: number | null;
   recorded_at: string | null;
+  /** Timestamp of the most recent successful ingest (offline watchdog). */
+  last_seen_at: string | null;
+  /** True when last_seen_at is within DEVICE_OFFLINE_MINUTES (default 15). */
+  online: boolean;
   computed_status: string | null;
   speed: number | null;
   heading: number | null;
@@ -116,7 +120,15 @@ export const telemetryApi = {
   features: (imei: string) => getJson<{ data: DeviceFeatures }>(`/features/${encodeURIComponent(imei)}`),
 
   commands: {
-    issue: (body: { imei: string; type: "setparam" | "setdigout" | "diagnostic" | "raw"; params?: Record<string, string | number | boolean> }) =>
+    issue: (body: {
+      imei: string;
+      type: "setparam" | "setdigout" | "diagnostic" | "raw";
+      params?: Record<string, string | number | boolean>;
+      /** Required for an ignition cut (setdigout 1); stored on the command. */
+      reason?: string;
+      /** Admin-only override of the moving-vehicle ignition-cut guard. */
+      force?: boolean;
+    }) =>
       postJson<{ data: DeviceCommand; message: string }>("/commands", body),
     list: (imei?: string) =>
       getJson<{ data: DeviceCommand[] }>(`/commands${imei ? `?imei=${encodeURIComponent(imei)}` : ""}`),
@@ -151,6 +163,8 @@ export interface DeviceFeatures {
   client_id: string | null;
   vehicle_number: string | null;
   registration_number: string | null;
+  last_seen_at: string | null;
+  online: boolean;
   live: {
     recorded_at: string;
     lat: number | null;
@@ -164,7 +178,7 @@ export interface DeviceFeatures {
   events: DeviceEvent[];
 }
 
-export type CommandStatus = "queued" | "sent" | "acked" | "failed";
+export type CommandStatus = "queued" | "sent" | "acked" | "acknowledged" | "failed";
 
 export interface DeviceCommand {
   id: string;
@@ -177,6 +191,8 @@ export interface DeviceCommand {
   created_at: string;
   sent_at: string | null;
   response_text: string | null;
+  reason: string | null;
+  acked_at: string | null;
   vehicle_number?: string | null;
   client_id?: string | null;
 }

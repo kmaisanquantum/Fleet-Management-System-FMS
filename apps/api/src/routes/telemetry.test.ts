@@ -10,6 +10,8 @@ import telemetryRouter, {
   detectFuelDelta,
   normalizeTimestamp,
   fuelLitersFromIo,
+  decodeIoFeatures,
+  loadIoFeatureMap,
 } from "./telemetry";
 import { resolveClientScopes } from "../utils/scope";
 
@@ -282,6 +284,33 @@ describe("Telemetry router", () => {
     expect(refuel).toBeDefined();
   });
 
+  it("ignores small fuel swings as jitter and flags large ones", async () => {
+    // The last stored fix for vehicle B is 102.5 L at 12:00. A +3 L swing is
+    // within the 5 L jitter window and must not raise a refuel/drain alert.
+    await post(
+      "/ingest",
+      { ...validPayload(imeiB, "2026-03-28T13:00:00Z"), fuel_liters: 102.5 + 3 },
+      INGEST_TOKEN
+    );
+    const jitter = db
+      .prepare("SELECT * FROM fleet_exceptions WHERE vehicle_id = ? AND created_at = ? AND rule_code IN ('RULE_REFUEL_DETECTED','RULE_FUEL_DRAIN')")
+      .all(vehicleBId, "2026-03-28 13:00:00");
+    expect(jitter).toHaveLength(0);
+
+    // A -30 L swing exceeds the threshold and is flagged as a drain.
+    const { body } = await post(
+      "/ingest",
+      { ...validPayload(imeiB, "2026-03-28T14:00:00Z"), fuel_liters: 105.5 - 30 },
+      INGEST_TOKEN
+    );
+    expect(body.alerts).toBeGreaterThanOrEqual(1);
+    const drain = db
+      .prepare("SELECT * FROM fleet_exceptions WHERE vehicle_id = ? AND created_at = ? AND rule_code = 'RULE_FUEL_DRAIN'")
+      .get(vehicleBId, "2026-03-28 14:00:00") as any;
+    expect(drain).toBeDefined();
+    expect(drain.type).toBe("fuel_drain");
+  });
+
   /* --------------------- client scoping --------------------- */
 
   it("scopes GET /latest to the caller's client", async () => {
@@ -298,6 +327,26 @@ describe("Telemetry router", () => {
   it("requires auth for GET /latest", async () => {
     const { status } = await get("/latest");
     expect(status).toBe(401);
+  });
+
+  it("flags a device offline when last_seen_at is stale", async () => {
+    // Prior ingests in this suite stamped last_seen_at, so the vehicle is online.
+    const fresh = await get("/latest", adminToken);
+    const online = fresh.body.data.find((v: any) => v.vehicle_id === vehicleAId);
+    expect(online.last_seen_at).toBeTruthy();
+    expect(online.online).toBe(true);
+
+    // Backdating last_seen_at beyond the 15-minute window flips it offline.
+    db.prepare("UPDATE vehicles SET last_seen_at = datetime('now', '-30 minutes') WHERE id = ?").run(vehicleAId);
+    const stale = await get("/latest", adminToken);
+    const offline = stale.body.data.find((v: any) => v.vehicle_id === vehicleAId);
+    expect(offline.online).toBe(false);
+    expect(offline.last_seen_at).toBeTruthy();
+
+    // The device-features endpoint exposes the same status.
+    const features = await get(`/features/${imeiA}`, adminToken);
+    expect(features.body.data.online).toBe(false);
+    expect(features.body.data.last_seen_at).toBeTruthy();
   });
 
   it("scopes GET /summary to the caller's client", async () => {
@@ -385,6 +434,50 @@ describe("Telemetry router", () => {
     expect(detectFuelDelta(60, 50)).toBe("drain");
     expect(detectFuelDelta(50, 52)).toBeNull();
     expect(detectFuelDelta(null, 60)).toBeNull();
+  });
+
+  it("ignores fuel deltas below the configured threshold (jitter filtering)", () => {
+    // Default threshold is 5 L: 4 L of movement is noise, 5 L is a real event.
+    expect(detectFuelDelta(50, 54)).toBeNull();
+    expect(detectFuelDelta(50, 55)).toBe("refuel");
+    expect(detectFuelDelta(50, 46)).toBeNull();
+    expect(detectFuelDelta(50, 45)).toBe("drain");
+
+    // The thresholds are env-driven and read at call time.
+    process.env.FUEL_REFUEL_MIN_L = "10";
+    process.env.FUEL_DRAIN_MIN_L = "8";
+    try {
+      expect(detectFuelDelta(50, 57)).toBeNull();
+      expect(detectFuelDelta(50, 60)).toBe("refuel");
+      expect(detectFuelDelta(50, 43)).toBeNull();
+      expect(detectFuelDelta(50, 42)).toBe("drain");
+    } finally {
+      delete process.env.FUEL_REFUEL_MIN_L;
+      delete process.env.FUEL_DRAIN_MIN_L;
+    }
+  });
+
+  it("normalizes FMB125 IO elements into engineering units", () => {
+    const map = loadIoFeatureMap();
+    const byId = (id: number) => map.find((f) => f.io_id === id);
+    expect(byId(66)).toMatchObject({ feature_key: "external_voltage", value_type: "scalar", scale_factor: 0.001 });
+    expect(byId(67)).toMatchObject({ feature_key: "internal_battery", value_type: "scalar", scale_factor: 0.001 });
+    expect(byId(16)).toMatchObject({ feature_key: "odometer", value_type: "scalar", scale_factor: 0.001 });
+    expect(byId(239)).toMatchObject({ feature_key: "ignition", value_type: "boolean" });
+    expect(byId(240)).toMatchObject({ feature_key: "movement", value_type: "boolean" });
+
+    const decoded = decodeIoFeatures({ "66": 12400, "67": 3900, "16": 123456, "240": 1 });
+    expect(decoded.find((f) => f.io_id === 66)?.scaled_value).toBeCloseTo(12.4, 3);
+    expect(decoded.find((f) => f.io_id === 67)?.scaled_value).toBeCloseTo(3.9, 3);
+    expect(decoded.find((f) => f.io_id === 16)?.scaled_value).toBeCloseTo(123.456, 3);
+    expect(decoded.find((f) => f.io_id === 240)?.scaled_value).toBe(1);
+  });
+
+  it("flags a main-power cut from a low external voltage (IO 66)", () => {
+    const cut = interpretIoAlerts({ "66": 0 });
+    expect(cut.find((a) => a.ruleCode === "RULE_MAIN_POWER_CUT")?.type).toBe("power_unplug");
+    // A healthy external voltage produces no alert.
+    expect(interpretIoAlerts({ "66": 12400 })).toHaveLength(0);
   });
 
   it("scales a raw fuel counter into litres via scale_factor", () => {

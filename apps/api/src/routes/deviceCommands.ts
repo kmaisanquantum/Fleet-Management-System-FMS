@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { db } from "../db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireIngestToken } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
@@ -17,6 +17,61 @@ import { writeAudit } from "../utils/audit";
  * next sync.
  */
 const router = Router();
+
+/**
+ * POST /api/telemetry/commands/ack
+ *
+ * Tracker-reply callback. The MeshSat VPS calls this when the FMB125 answers a
+ * queued command over Codec 12, authenticated with the same
+ * `Authorization: Bearer ${TELEMETRY_INGEST_TOKEN}` used by `/ingest`.
+ *
+ * Body: `{ imei, command | cmd, response | reply }`, where `command`/`cmd` is
+ * the Teltonika command string the tracker acknowledged (e.g. `setparam 1580:80`)
+ * and `response`/`reply` is the tracker's raw reply text.
+ *
+ * The most recent `device_commands` row for that imei with status `sent` whose
+ * serialized command matches is marked `acknowledged` (storing `response_text`
+ * and `acked_at`). Returns 200 with the updated row, or 404 when no sent
+ * command matches. Registered before `requireAuth` — this path uses the ingest
+ * bearer token, not a user JWT.
+ */
+router.post("/ack", requireIngestToken, (req, res, next) => {
+  try {
+    const parsed = ackSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid ack payload", details: parsed.error.flatten() });
+    }
+    const { imei } = parsed.data;
+    const command = (parsed.data.command ?? parsed.data.cmd ?? "").trim();
+    const reply = parsed.data.response ?? parsed.data.reply ?? null;
+
+    const rows = db
+      .prepare("SELECT id, payload_json FROM device_commands WHERE imei = ? AND status = 'sent' ORDER BY created_at DESC")
+      .all(imei) as { id: string; payload_json: string | null }[];
+
+    const match = rows.find((row) => {
+      if (!row.payload_json) return false;
+      try {
+        return serializeCommand(JSON.parse(row.payload_json)).trim() === command;
+      } catch {
+        return false;
+      }
+    });
+    if (!match) return res.status(404).json({ error: "No matching sent command", imei, command });
+
+    const ackedAt = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE device_commands SET status = 'acknowledged', response_text = ?, acked_at = ? WHERE id = ?")
+      .run(reply, ackedAt, match.id);
+
+    res.json({
+      data: db.prepare("SELECT * FROM device_commands WHERE id = ?").get(match.id),
+      message: "Command acknowledged",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.use(requireAuth);
 
 /** Roles permitted to dispatch device commands (client-role users are excluded). */
@@ -28,10 +83,30 @@ const COMMAND_ROLES = ["admin", "fleet_manager"];
  */
 const DIAGNOSTIC_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus"]);
 
+/**
+ * Speed above which an ignition cut (setdigout 1) is refused: immobilising a
+ * moving vehicle is unsafe. Overridable only by an `admin` that explicitly
+ * passes `force: true` (which is audited as IGNITION_CUT_FORCED).
+ */
+export const IGNITION_CUT_SPEED_LIMIT_KMH = 10;
+
 const commandSchema = z.object({
   imei: z.string().min(1),
   type: z.enum(["setparam", "setdigout", "diagnostic", "raw"]),
   params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional().default({}),
+  /** Admin-only override of the moving-vehicle ignition-cut guard. */
+  force: z.boolean().optional(),
+  /** Operator-supplied justification; required for an ignition cut. */
+  reason: z.string().optional(),
+});
+
+/** Body contract for the tracker-ack callback (POST /ack). */
+const ackSchema = z.object({
+  imei: z.string().min(1),
+  command: z.string().min(1).optional(),
+  cmd: z.string().min(1).optional(),
+  response: z.string().optional(),
+  reply: z.string().optional(),
 });
 
 export interface BuiltCommand {
@@ -110,6 +185,23 @@ export function serializeCommand(command: Record<string, unknown>): string {
 }
 
 /**
+ * Most recent reported speed (km/h) for a vehicle, from the rich
+ * `telemetry_records` table when available and otherwise the legacy
+ * `gps_positions` table. `null` when the vehicle has never reported a fix.
+ */
+export function latestSpeedKmh(vehicleId: string): number | null {
+  const t = db
+    .prepare("SELECT speed_kmh FROM telemetry_records WHERE vehicle_id = ? AND speed_kmh IS NOT NULL ORDER BY recorded_at DESC LIMIT 1")
+    .get(vehicleId) as { speed_kmh: number } | undefined;
+  if (t?.speed_kmh !== undefined && t?.speed_kmh !== null) return Number(t.speed_kmh);
+
+  const p = db
+    .prepare("SELECT speed FROM gps_positions WHERE vehicle_id = ? ORDER BY recorded_at DESC LIMIT 1")
+    .get(vehicleId) as { speed: number } | undefined;
+  return p?.speed !== undefined && p?.speed !== null ? Number(p.speed) : null;
+}
+
+/**
  * Hands a command to the MeshSat VPS command endpoint
  * (`POST ${MESHSAT_CMD_URL}/api/cmd`), authenticated with
  * `Authorization: Bearer ${MESHSAT_CMD_TOKEN}`. Both env vars are read at call
@@ -143,6 +235,7 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
     const parsed = commandSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid command", details: parsed.error.flatten() });
     const { imei, type, params } = parsed.data;
+    const reason = (parsed.data.reason ?? "").trim() || null;
 
     const device = db
       .prepare("SELECT id, vehicle_id, client_id FROM gps_devices WHERE device_identifier = ?")
@@ -158,11 +251,31 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
     const built = buildCommand(type, params);
     if (!built.command) return res.status(400).json({ error: "Invalid command parameters", details: built.error });
 
+    // Ignition-cut safety guard (setdigout 1). An ignition cut requires an
+    // operator-supplied reason, and is refused while the vehicle is moving
+    // (> IGNITION_CUT_SPEED_LIMIT_KMH) unless an admin explicitly forces it.
+    const isIgnitionCut = type === "setdigout" && built.command.dout === 1;
+    let forcedOverride = false;
+    let cutSpeedKmh: number | null = null;
+    if (isIgnitionCut) {
+      if (!reason) {
+        return res.status(400).json({ error: "A reason is required for an ignition cut", details: "Supply a non-empty 'reason'" });
+      }
+      cutSpeedKmh = latestSpeedKmh(device.vehicle_id);
+      if (cutSpeedKmh !== null && cutSpeedKmh > IGNITION_CUT_SPEED_LIMIT_KMH) {
+        const canForce = req.user!.roleName === "admin" && parsed.data.force === true;
+        if (!canForce) {
+          return res.status(409).json({ error: "Vehicle moving — ignition cut blocked", speed_kmh: cutSpeedKmh });
+        }
+        forcedOverride = true;
+      }
+    }
+
     const id = uuid();
     db.prepare(`
-      INSERT INTO device_commands (id, imei, vehicle_id, command_type, payload_json, status, requested_by)
-      VALUES (?, ?, ?, ?, ?, 'queued', ?)
-    `).run(id, imei, device.vehicle_id, type, JSON.stringify(built.command), req.user!.id);
+      INSERT INTO device_commands (id, imei, vehicle_id, command_type, payload_json, status, requested_by, reason)
+      VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
+    `).run(id, imei, device.vehicle_id, type, JSON.stringify(built.command), req.user!.id, reason);
 
     const serialized = serializeCommand(built.command);
 
@@ -177,8 +290,20 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
       action: auditAction,
       entity: "device_commands",
       entityId: id,
-      newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, type, params },
+      newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, type, params, reason },
     });
+
+    // A forced override of the moving-vehicle guard is logged distinctly so the
+    // override (and the speed/reason behind it) is auditable on its own.
+    if (forcedOverride) {
+      writeAudit({
+        userId: req.user!.id,
+        action: "IGNITION_CUT_FORCED",
+        entity: "device_commands",
+        entityId: id,
+        newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, speed_kmh: cutSpeedKmh, reason, forced: true },
+      });
+    }
 
     // Forward to the MeshSat VPS command endpoint. A 2xx means the command was
     // accepted for delivery ('sent'); any rejection or transport failure is

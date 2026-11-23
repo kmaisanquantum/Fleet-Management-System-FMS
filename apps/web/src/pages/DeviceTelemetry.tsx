@@ -17,6 +17,7 @@ const STATUS_STYLES: Record<string, string> = {
   queued: "bg-amber-400/15 text-amber-400",
   sent: "bg-signal-green/15 text-signal-green",
   acked: "bg-emerald-500/15 text-emerald-400",
+  acknowledged: "bg-emerald-500/15 text-emerald-400",
   failed: "bg-signal-red/15 text-signal-red",
 };
 
@@ -81,6 +82,7 @@ export default function DeviceTelemetry() {
   // Pending immobilizer action awaiting explicit confirmation.
   const [confirmDigout, setConfirmDigout] = useState<0 | 1 | null>(null);
   const [confirmChecked, setConfirmChecked] = useState(false);
+  const [confirmReason, setConfirmReason] = useState("");
 
   const load = useCallback(async () => {
     if (!imei) return;
@@ -135,14 +137,15 @@ export default function DeviceTelemetry() {
     await issue({ imei, type: "setparam", params: { feature_key: p.feature_key, value } });
   }
 
-  async function sendDigout(dout: 0 | 1) {
+  async function sendDigout(dout: 0 | 1, reason?: string) {
     if (!imei) return;
-    await issue({ imei, type: "setdigout", params: { dout } });
+    await issue({ imei, type: "setdigout", params: { dout }, ...(reason ? { reason } : {}) });
   }
 
   /** Opens the confirmation modal for an immobilizer action (no dispatch yet). */
   function requestDigout(dout: 0 | 1) {
     setConfirmChecked(false);
+    setConfirmReason("");
     setConfirmDigout(dout);
   }
 
@@ -150,8 +153,14 @@ export default function DeviceTelemetry() {
   async function confirmDigoutAction() {
     if (confirmDigout === null) return;
     const dout = confirmDigout;
+    const reason = confirmReason.trim();
+    // The API requires a non-empty reason for an ignition cut.
+    if (dout === 1 && !reason) {
+      setError("A reason is required before cutting the ignition.");
+      return;
+    }
     setConfirmDigout(null);
-    await sendDigout(dout);
+    await sendDigout(dout, reason || undefined);
   }
 
   /** Read-only status command (getinfo / getgps / getver). */
@@ -237,8 +246,14 @@ export default function DeviceTelemetry() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-ink-100">{device.vehicle_number || "Device"}</h1>
             <span className="text-sm font-mono px-2 py-0.5 rounded bg-base-800 text-ink-300">{device.registration_number}</span>
+            {device.online === false && (
+              <span className="badge bg-signal-red/15 text-signal-red">Offline</span>
+            )}
           </div>
           <p className="text-sm text-ink-400 mt-1 font-mono">IMEI {device.imei}</p>
+          <p className={`text-xs mt-1 ${device.online === false ? "text-signal-red" : "text-ink-500"}`}>
+            Last seen {fmtDate(device.last_seen_at)}
+          </p>
           {lastRefresh && (
             <div className="text-xs text-ink-500 mt-1">Last updated {lastRefresh.toLocaleTimeString()} · auto-refresh every 15s</div>
           )}
@@ -528,11 +543,24 @@ export default function DeviceTelemetry() {
               {confirmDigout === 1 ? (
                 <div className="p-3 rounded bg-signal-red/10 text-signal-red">
                   Warning: cutting the ignition immobilizes this vehicle. It will not start until the ignition is
-                  restored. Only proceed if the vehicle is stationary and it is safe and authorised to do so.
+                  restored. Only proceed if the vehicle is stationary and it is safe and authorised to do so. Cutting
+                  the ignition on a moving vehicle (over 10 km/h) is blocked by the API.
                 </div>
               ) : (
                 <div className="p-3 rounded bg-amber-400/10 text-amber-400">
                   This restores the ignition and allows the vehicle to start again.
+                </div>
+              )}
+              {confirmDigout === 1 && (
+                <div className="space-y-1">
+                  <label className="text-[11px] text-ink-400">Reason (required — recorded in the audit log)</label>
+                  <input
+                    type="text"
+                    value={confirmReason}
+                    onChange={(e) => setConfirmReason(e.target.value)}
+                    placeholder="e.g. authorised immobilisation after theft report"
+                    className="input w-full text-xs bg-base-900 border-base-700 text-ink-100"
+                  />
                 </div>
               )}
               <label className="flex items-start gap-2 cursor-pointer">
@@ -555,7 +583,7 @@ export default function DeviceTelemetry() {
               </button>
               <button
                 onClick={confirmDigoutAction}
-                disabled={!confirmChecked || busy}
+                disabled={!confirmChecked || busy || (confirmDigout === 1 && !confirmReason.trim())}
                 className={
                   confirmDigout === 1
                     ? "bg-signal-red hover:bg-signal-red/80 text-white font-semibold px-4 py-2 rounded-md transition-colors text-xs disabled:opacity-40 disabled:cursor-not-allowed"
