@@ -476,7 +476,26 @@ A `201` with `alerts >= 1` confirms the record was stored and the overspeed IO e
 
 ## 9. Remote Configuration & Control (Teltonika Codec 12)
 
-FMS users with the `admin` or `fleet_manager` role can push remote config/control commands (`setparam`, `setdigout`, `raw`) to a tracker. The `client_user` role is read-only (403). Commands are **queued** in `device_commands` and POSTed to the **meshsat.dspng.space VPS command endpoint**, which queues them and delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+FMS users with the `admin` or `fleet_manager` role can push remote config/control commands (`setparam`, `setdigout`, `diagnostic`, `raw`) to a tracker. The `client_user` role is read-only (403). Commands are **queued** in `device_commands` and POSTed to the **meshsat.dspng.space VPS command endpoint**, which queues them and delivers them to the tracker over its **next TCP session (5027)** using Codec 12. Because delivery waits for the tracker to sync, the UI shows **"Queued / Pending Next Tracker Sync"** until the tracker acknowledges.
+
+### 9.0 Command types
+
+| `type` | `params` | Emitted command |
+|---|---|---|
+| `setparam` | `{ param_id \| feature_key, value }` | `setparam <paramId>:<value>` |
+| `setdigout` | `{ dout: 0\|1, timeout? }` | `setdigout <dout>` or `setdigout <dout> <timeout>` |
+| `diagnostic` | `{ command }` ∈ `getinfo`, `getgps`, `getver`, `getstatus` | the whitelisted string as-is |
+| `raw` | `{ command }` | the raw string as-is |
+
+* **Diagnostic** commands are read-only status requests (`getinfo`, `getgps`, `getver`, `getstatus`). Only those four exact strings are accepted — arbitrary strings are **rejected** by the `diagnostic` type; use `raw` for anything outside the whitelist. The tracker replies on its next TCP sync and the result is visible in the command history.
+* **`setdigout` timeout** is optional and, when supplied, must be a non-negative integer (the DOUT pulse duration); omitting it keeps the backward-compatible `setdigout <dout>` form.
+
+### 9.0.1 Immobilizer flow (remote ignition cut / restore)
+
+* **Cut / immobilize:** `setdigout` with `dout=1` (`setdigout 1`) — drives DOUT1 to immobilize the vehicle.
+* **Restore:** `setdigout` with `dout=0` (`setdigout 0`) — releases DOUT1 so the vehicle can start again.
+* Both are routed through the dedicated **Remote Ignition Shutdown / Restore** panel in the device page, which displays the current **ignition state (IO 239)** and **DOUT/immobilizer state (IO 179)** decoded via `GET /api/telemetry/features/:imei`, and requires an explicit **confirmation modal** — showing the vehicle/IMEI, the exact command string to be sent, and an immobilization warning — before the command is queued. The confirmation checkbox must be ticked before the **Issue** button enables.
+* **Audit:** ignition actions are recorded in `audit_logs` with distinct actions — `IGNITION_CUT_QUEUED` (`dout=1`), `IGNITION_RESTORE_QUEUED` (`dout=0`) — while every other command keeps `DEVICE_COMMAND_QUEUED`. Each audit `newValue` carries `imei`, `vehicle_id` and the serialized `command`.
 
 > The command queue lives on the **meshsat.dspng.space VPS** (its `/api/cmd` on `127.0.0.1:6051` → Codec 12 over TCP 5027). This repository's `services/meshsat-relay` only forwards telemetry; it does **not** host `/api/cmd`.
 
@@ -530,11 +549,31 @@ The FMS API side (`apps/api/src/routes/deviceCommands.ts`, mounted at `/api/tele
 ### 9.4 Verification
 
 ```bash
-# Queue an immobilizer DOUT engagement (replace <JWT> with a fleet_manager token)
+# Cut the ignition (immobilize) — replace <JWT> with a fleet_manager token
 curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
   -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1 } }'
+# → relayed as "setdigout 1", audited IGNITION_CUT_QUEUED
+
+# Restore the ignition
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 0 } }'
+# → relayed as "setdigout 0", audited IGNITION_RESTORE_QUEUED
+
+# Optional DOUT pulse timeout (emits "setdigout 1 30")
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "type": "setdigout", "params": { "dout": 1, "timeout": 30 } }'
+
+# Read-only diagnostic (getinfo | getgps | getver | getstatus)
+curl -X POST https://fleet.dspng.tech/api/telemetry/commands \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{ "imei": "354018115690145", "type": "diagnostic", "params": { "command": "getgps" } }'
 
 # Inspect the queue + status history
 curl "https://fleet.dspng.tech/api/telemetry/commands?imei=354018115690145" \

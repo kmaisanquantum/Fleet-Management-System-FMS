@@ -56,15 +56,17 @@ Client scoping: fleet/national roles (`admin`, `fleet_admin`, `fleet_manager`, `
 
 Remote configuration/control for FMB125 trackers. All routes require an authenticated JWT with an elevated role (`admin` or `fleet_manager`) — the `client_user` role is **forbidden** (403) — and the target device's vehicle must belong to a client the caller may manage. Commands are queued in `device_commands`, audited, then POSTed to the MeshSat VPS command endpoint (`POST ${MESHSAT_CMD_URL}/api/cmd`, body `{ "imei": "<15-digit>", "command": "<teltonika-cmd>" }`, header `Authorization: Bearer ${MESHSAT_CMD_TOKEN}`), which queues them and delivers over the tracker's next TCP session (5027). Delivery is asynchronous.
 
-The `command` string is the Teltonika form: `setparam <paramId>:<value>` (e.g. `setparam 1580:80`), `setdigout <0|1>` (e.g. `setdigout 1`), or the raw command for `raw`.
+The `command` string is the Teltonika form: `setparam <paramId>:<value>` (e.g. `setparam 1580:80`); `setdigout <0|1>` or `setdigout <0|1> <timeout>` (e.g. `setdigout 1`, `setdigout 1 30`); a `diagnostic` status command (`getinfo` \| `getgps` \| `getver` \| `getstatus`); or the raw command for `raw`.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/` | Queue a command `{ imei, type: 'setparam' \| 'setdigout' \| 'raw', params }`. `setparam` resolves `param_id` (or a mapped `feature_key`) via `param_map` and requires `value`; `setdigout` requires `dout` = 0/1 (immobilizer/DOUT1); `raw` requires a `command` string. Writes `audit_logs`. Endpoint accepts (2xx) → `status='sent'` + `sent_at`; endpoint rejects (non-2xx) or is unreachable → `'failed'` with the error in `response_text`. Response message: "Queued / Pending Next Tracker Sync". |
+| POST | `/` | Queue a command `{ imei, type: 'setparam' \| 'setdigout' \| 'diagnostic' \| 'raw', params }`. `setparam` resolves `param_id` (or a mapped `feature_key`) via `param_map` and requires `value`; `setdigout` requires `dout` = 0/1 (immobilizer/DOUT1) and accepts an optional non-negative integer `timeout` (emits `setdigout <dout> <timeout>`); `diagnostic` requires `command` ∈ { `getinfo`, `getgps`, `getver`, `getstatus` } — a whitelist only, arbitrary strings are rejected (use `raw` for those); `raw` requires a `command` string. Writes `audit_logs` with action `IGNITION_CUT_QUEUED` (setdigout `dout=1`), `IGNITION_RESTORE_QUEUED` (setdigout `dout=0`), or `DEVICE_COMMAND_QUEUED` (everything else); the audit `newValue` carries `imei`, `vehicle_id` and the serialized `command`. Endpoint accepts (2xx) → `status='sent'` + `sent_at`; endpoint rejects (non-2xx) or is unreachable → `'failed'` with the error in `response_text`. Response message: "Queued / Pending Next Tracker Sync". |
 | GET | `/?imei=` | Queue + delivery history (up to 200 rows, newest first), tenant-scoped. |
 | POST | `/:id/cancel` | Cancel a still-`queued` command (marks it `failed` with a reason); `409` if already dispatched. Writes `audit_logs`. |
 
 Command statuses: `queued` → `sent` → `acked`, or `failed`. (With the current VPS contract a forward either succeeds immediately — `sent` — or is marked `failed`; a row remains `queued` only in the brief window before dispatch is attempted.)
+
+**Immobilizer safety.** The web device panel requires an explicit confirmation (a modal showing the vehicle/IMEI, the exact command string, and an immobilization warning, gated behind a confirmation checkbox) before it will dispatch an ignition cut (`setdigout 1`) or restore (`setdigout 0`). The API itself does not enforce a second confirmation — callers that automate immobilization must implement their own guard.
 
 ## Fuel Transactions — `/api/v1/fuel-transactions`
 
