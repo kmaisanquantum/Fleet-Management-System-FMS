@@ -169,8 +169,9 @@ CREATE TABLE IF NOT EXISTS gps_devices (
   vehicle_id TEXT REFERENCES vehicles(id),
   device_identifier TEXT UNIQUE NOT NULL,
   device_type TEXT NOT NULL DEFAULT 'meshsat' CHECK(device_type IN ('meshsat', 'teltonika')),
-  -- Hardware model (e.g. FMB125). Drives which UI tabs / IO mappings apply.
-  device_model TEXT DEFAULT 'FMB125',
+  -- Hardware model. Drives which UI tabs / IO mappings / capabilities apply.
+  device_model TEXT NOT NULL DEFAULT 'FMB125'
+    CHECK(device_model IN ('FMB125', 'FMC130', 'FMC650', 'FMB920', 'DUALCAM')),
   -- JSON capability flags: {has_fuel_rs232, has_can_j1939, has_ble_sensors, has_camera, dout_count}
   capabilities TEXT,
   client_id TEXT REFERENCES clients(id),
@@ -223,6 +224,7 @@ CREATE TABLE IF NOT EXISTS telemetry_records (
   lon REAL,
   sats INTEGER,
   speed_kmh REAL,
+  heading REAL,
   ignition INTEGER,
   fuel_liters REAL,
   -- Normalized FMB125 engineering values (raw IO kept in io_json).
@@ -232,6 +234,8 @@ CREATE TABLE IF NOT EXISTS telemetry_records (
   movement INTEGER,
   -- Driver identity from the iButton reader (IO 78) when present.
   driver_id TEXT,
+  -- Raw iButton/driver tag id (IO 78); kept separate from any future driver FK.
+  driver_tag_id TEXT,
   io_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (imei, recorded_at)
@@ -244,9 +248,9 @@ CREATE TABLE IF NOT EXISTS device_commands (
   vehicle_id TEXT REFERENCES vehicles(id),
   command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
   payload_json TEXT,
-  -- queued -> sent -> acknowledged, or failed. 'acked' is kept as a legacy
-  -- synonym so pre-existing rows/readers continue to work.
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
+  -- queued -> sent -> acknowledged, or failed / expired (TTL elapsed). 'acked'
+  -- is kept as a legacy synonym so pre-existing rows/readers continue to work.
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed', 'expired')),
   requested_by TEXT REFERENCES users(id),
   -- Operator-supplied justification (required for an ignition cut).
   reason TEXT,
@@ -330,6 +334,8 @@ CREATE TABLE IF NOT EXISTS fuel_stations (
 CREATE TABLE IF NOT EXISTS geofences (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  -- Owning tenant; NULL = global / all clients.
+  client_id TEXT REFERENCES clients(id),
   lat REAL NOT NULL,
   lon REAL NOT NULL,
   radius_meters REAL NOT NULL DEFAULT 1000,
@@ -389,6 +395,8 @@ CREATE TABLE IF NOT EXISTS fleet_exceptions (
   notes TEXT,
   resolution TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Set when an operator acknowledges the exception from the alert-rules UI.
+  acknowledged_at TEXT,
   resolved_at TEXT
 );
 
@@ -474,6 +482,109 @@ CREATE TABLE IF NOT EXISTS vehicle_disposals (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ------------------------------------------------------------------ --
+-- Fleet-expansion tables (schema foundations: tables + indexes + FKs).
+-- No business logic yet — populated by later feature work.
+-- ------------------------------------------------------------------ --
+
+-- Automatic trips derived from telemetry (distinct from the manual
+-- vehicle_trips log, which is left untouched).
+CREATE TABLE IF NOT EXISTS telemetry_trips (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  device_id TEXT REFERENCES gps_devices(id),
+  client_id TEXT REFERENCES clients(id),
+  driver_tag_id TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  start_lat REAL,
+  start_lon REAL,
+  end_lat REAL,
+  end_lon REAL,
+  distance_km REAL,
+  duration_sec INTEGER,
+  max_speed_kmh REAL,
+  idle_sec INTEGER,
+  fuel_used_liters REAL,
+  safety_score REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-tenant configurable alert rules (thresholds / severities / toggles).
+CREATE TABLE IF NOT EXISTS alert_rules (
+  id TEXT PRIMARY KEY,
+  client_id TEXT REFERENCES clients(id),
+  alert_type TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'warning' CHECK(severity IN ('critical', 'warning', 'info')),
+  config_json TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Preventive-maintenance schedules (odometer / engine-hours / calendar).
+CREATE TABLE IF NOT EXISTS maintenance_schedules (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  client_id TEXT REFERENCES clients(id),
+  interval_type TEXT NOT NULL CHECK(interval_type IN ('odometer_km', 'engine_hours', 'calendar')),
+  interval_value REAL NOT NULL,
+  last_done_at TEXT,
+  last_done_odometer REAL,
+  next_due TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Work orders raised against a maintenance schedule.
+CREATE TABLE IF NOT EXISTS work_orders (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT REFERENCES maintenance_schedules(id),
+  vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  client_id TEXT REFERENCES clients(id),
+  description TEXT NOT NULL,
+  cost_pgk REAL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'in_progress', 'completed', 'cancelled')),
+  opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+  closed_at TEXT
+);
+
+-- Dispatch jobs with proof-of-delivery (signature / photo / GPS).
+CREATE TABLE IF NOT EXISTS dispatch_jobs (
+  id TEXT PRIMARY KEY,
+  client_id TEXT REFERENCES clients(id),
+  vehicle_id TEXT REFERENCES vehicles(id),
+  driver_id TEXT REFERENCES drivers(id),
+  stops_json TEXT,
+  status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned', 'in_progress', 'completed', 'cancelled')),
+  pod_signature_url TEXT,
+  pod_photo_url TEXT,
+  pod_lat REAL,
+  pod_lon REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+-- Public read-only share links for a vehicle's live location (expiring token).
+CREATE TABLE IF NOT EXISTS share_links (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  client_id TEXT REFERENCES clients(id),
+  token TEXT UNIQUE NOT NULL,
+  expires_at TEXT,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-client module subscriptions (which product modules a tenant has enabled).
+CREATE TABLE IF NOT EXISTS client_subscriptions (
+  id TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES clients(id),
+  module TEXT NOT NULL CHECK(module IN ('tracking', 'fuel_immobilizer', 'camera_adas', 'maintenance_dispatch')),
+  vehicle_quota INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (client_id, module)
+);
+
 -- View for current vehicle status
 DROP VIEW IF EXISTS vehicle_status_view;
 CREATE VIEW vehicle_status_view AS
@@ -517,6 +628,16 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei,
 CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_media_device ON device_media(device_id, captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_media_captured ON device_media(captured_at DESC);
+-- Fleet-expansion indexes
+CREATE INDEX IF NOT EXISTS idx_telemetry_trips_vehicle ON telemetry_trips(vehicle_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_telemetry_trips_client ON telemetry_trips(client_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_rules_client ON alert_rules(client_id, alert_type);
+CREATE INDEX IF NOT EXISTS idx_maintenance_schedules_vehicle ON maintenance_schedules(vehicle_id, interval_type);
+CREATE INDEX IF NOT EXISTS idx_work_orders_vehicle ON work_orders(vehicle_id, status);
+CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_client ON dispatch_jobs(client_id, status);
+CREATE INDEX IF NOT EXISTS idx_share_links_token ON share_links(token);
+CREATE INDEX IF NOT EXISTS idx_client_subscriptions_client ON client_subscriptions(client_id);
+CREATE INDEX IF NOT EXISTS idx_geofences_client ON geofences(client_id);
 
 -- Default IO feature map (Teltonika FMB125 AVL element ids). Starting defaults
 -- only — edit to match the device's configured IO list (see Settings screen).

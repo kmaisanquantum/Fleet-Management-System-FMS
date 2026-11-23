@@ -103,6 +103,8 @@ function migrateExistingDatabase() {
   addColumn("telemetry_records", "odometer_km", "REAL");
   addColumn("telemetry_records", "movement", "INTEGER");
   addColumn("telemetry_records", "driver_id", "TEXT");
+  addColumn("telemetry_records", "heading", "REAL");
+  addColumn("telemetry_records", "driver_tag_id", "TEXT");
 
   // gps_devices — vendor/protocol discriminator
   addColumn("gps_devices", "device_type", "TEXT NOT NULL DEFAULT 'meshsat'");
