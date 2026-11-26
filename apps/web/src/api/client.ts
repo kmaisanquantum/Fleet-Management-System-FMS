@@ -63,7 +63,10 @@ export function refreshAccessToken(): Promise<string | null> {
         body: JSON.stringify({ refreshToken }),
       });
       if (!res.ok) {
-        if (res.status === 401 || res.status === 403) setToken(null);
+        if (res.status === 401 || res.status === 403) {
+          sessionStorage.setItem("fms_logout_reason", "expired");
+          setToken(null);
+        }
         return null;
       }
       const data = (await res.json()) as { accessToken?: string };
@@ -108,9 +111,12 @@ async function request<T>(path: string, options: RequestInit = {}, retried = fal
 
   // The access token can still be rejected (clock skew, revocation, a token that
   // expired in flight). Refresh once and replay the request.
-  if (res.status === 401 && canRefresh && !retried) {
-    const refreshed = await refreshAccessToken();
-    if (refreshed) return request<T>(path, options, true);
+  if (res.status === 401 && canRefresh) {
+    if (!retried) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) return request<T>(path, options, true);
+    }
+    sessionStorage.setItem("fms_logout_reason", "expired");
     setToken(null);
   }
 
