@@ -241,12 +241,12 @@ describe("MeshSat map proxy", () => {
     expect(res.headers.get("set-cookie") || "").not.toContain("upstream_session");
   });
 
-  it("serves the map HTML with a non-OSM basemap", async () => {
+  it("serves the map HTML with a keyless CARTO basemap replaced", async () => {
     const calls: UpstreamCall[] = [];
     mockUpstream(
       () =>
         new Response(
-          `<html><script>L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);</script></html>`,
+          `<html><script>L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(map);</script></html>`,
           { status: 200, headers: { "content-type": "text/html" } },
         ),
       calls,
@@ -255,7 +255,8 @@ describe("MeshSat map proxy", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("arcgisonline.com");
-    expect(html).not.toContain("tile.openstreetmap.org");
+    expect(html).not.toContain("cartocdn");
+    expect(html).not.toContain("CARTO");
   });
 });
 
@@ -278,6 +279,17 @@ describe("applyTileSource", () => {
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
     );
     expect(out).not.toContain("tile.openstreetmap.org");
+    expect(out).toContain("Esri");
+  });
+
+  it("replaces keyless CARTO tiles with the default CDN provider and attribution", () => {
+    const carto = `<script>L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }).addTo(map);</script>`;
+    const out = applyTileSource(carto);
+    expect(out).toContain(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    );
+    expect(out).not.toContain("cartocdn");
+    expect(out).not.toContain("CARTO");
     expect(out).toContain("Esri");
   });
 

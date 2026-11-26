@@ -165,8 +165,9 @@ export function rewriteMeshSatUrls(html: string, origin: string): string {
 const router = Router();
 
 /**
- * OSM's volunteer tile servers answer this deployment with `403 Access blocked`
- * tiles, so the map's basemap is rewritten to a CDN-backed provider. Override
+ * The upstream map has used keyless OSM and CARTO basemaps. OSM answers this
+ * deployment with `403 Access blocked`; CARTO renders "API KEY REQUIRED"
+ * watermarks without a key. Rewrite both to a CDN-backed provider. Override
  * `MESHSAT_MAP_TILE_URL` / `MESHSAT_MAP_TILE_ATTRIBUTION` to use a licensed key.
  */
 const DEFAULT_TILE_URL =
@@ -190,11 +191,11 @@ export function applyTileSource(html: string): string {
   const attribution = mapTileAttribution();
 
   let out = html.replace(
-    /https?:\/\/[^"'\s)]*openstreetmap[^"'\s)]*\/\{z\}\/\{x\}\/\{y\}[^"'\s)]*\.png/gi,
+    /https?:\/\/[^"'\s)]*(?:openstreetmap|cartocdn|cartodb)[^"'\s)]*\{z\}[^"'\s)]*\.png/gi,
     () => tileUrl,
   );
   out = out.replace(/attribution:\s*(['"])(.*?)\1/gi, (match, quote: string, value: string) => {
-    if (!/openstreetmap/i.test(value)) return match;
+    if (!/(?:openstreetmap|carto)/i.test(value)) return match;
     const escaped = quote === "'" ? attribution.replace(/'/g, "\\'") : attribution.replace(/"/g, '\\"');
     return `attribution: ${quote}${escaped}${quote}`;
   });
