@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
@@ -9,6 +9,18 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice] = useState(() => sessionStorage.getItem("fms_logout_reason"));
+
+  useEffect(() => {
+    sessionStorage.removeItem("fms_logout_reason");
+  }, []);
+
+  const noticeText =
+    notice === "idle"
+      ? "You were signed out after a period of inactivity. Please sign in again."
+      : notice === "expired"
+        ? "Your session expired. Please sign in again."
+        : null;
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -36,6 +48,12 @@ export default function Login() {
           <h1 className="font-display text-xl font-semibold text-ink-100">Fleet Management System</h1>
           <p className="text-xs text-ink-500 mt-1 uppercase tracking-widest">Fleet & Vehicle Operations</p>
         </div>
+
+        {noticeText && (
+          <div className="mb-4 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+            {noticeText}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="panel p-6 space-y-4">
           <div>
