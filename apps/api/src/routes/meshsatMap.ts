@@ -73,33 +73,40 @@ function readCookie(req: Request, name: string): string | undefined {
  */
 export function requireMapAuth(req: Request, res: ExpressResponse, next: NextFunction) {
   const header = req.headers.authorization;
-  let token: string | undefined;
-  let fromQuery = false;
+  const queryToken =
+    typeof req.query.fms_token === "string" && req.query.fms_token ? req.query.fms_token : undefined;
+  const cookieToken = readCookie(req, MAP_COOKIE_NAME);
+
+  // A Bearer header is authoritative (XHR/fetch callers). For iframe navigations
+  // the query token is preferred because a valid one also refreshes the cookie,
+  // but a stale URL token must not shadow a fresh cookie set by /session.
+  const candidates: { token: string; fromQuery: boolean }[] = [];
   if (header?.startsWith("Bearer ")) {
-    token = header.slice("Bearer ".length);
-  } else if (typeof req.query.fms_token === "string" && req.query.fms_token) {
-    token = req.query.fms_token;
-    fromQuery = true;
+    candidates.push({ token: header.slice("Bearer ".length), fromQuery: false });
   } else {
-    token = readCookie(req, MAP_COOKIE_NAME);
+    if (queryToken) candidates.push({ token: queryToken, fromQuery: true });
+    if (cookieToken) candidates.push({ token: cookieToken, fromQuery: false });
   }
 
-  if (!token) return res.status(401).json({ error: "Missing FMS token" });
-  try {
-    req.user = verifyAccessToken(token);
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token" });
+  for (const candidate of candidates) {
+    try {
+      req.user = verifyAccessToken(candidate.token);
+      if (candidate.fromQuery) {
+        res.cookie(MAP_COOKIE_NAME, candidate.token, {
+          httpOnly: true,
+          sameSite: "lax",
+          secure: req.secure,
+          path: PROXY_PREFIX,
+          maxAge: MAP_COOKIE_MAX_AGE_MS,
+        });
+      }
+      return next();
+    } catch {
+      // Try the next credential.
+    }
   }
 
-  if (fromQuery) {
-    res.cookie(MAP_COOKIE_NAME, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: PROXY_PREFIX,
-      maxAge: MAP_COOKIE_MAX_AGE_MS,
-    });
-  }
-  next();
+  return res.status(401).json({ error: candidates.length ? "Invalid or expired token" : "Missing FMS token" });
 }
 
 /**
@@ -125,6 +132,9 @@ export function sanitizeUpstreamHeaders(headers: Headers): Record<string, string
     if (k === "content-encoding" || k === "content-length" || k === "transfer-encoding" || k === "connection") {
       return;
     }
+    // Never let the upstream set cookies on the FMS origin: it could overwrite
+    // `fms_map_token` itself (or another path-scoped FMS cookie).
+    if (k === "set-cookie") return;
     out[k] = value;
   });
   return out;
@@ -153,6 +163,52 @@ export function rewriteMeshSatUrls(html: string, origin: string): string {
 }
 
 const router = Router();
+
+/**
+ * OSM's volunteer tile servers answer this deployment with `403 Access blocked`
+ * tiles, so the map's basemap is rewritten to a CDN-backed provider. Override
+ * `MESHSAT_MAP_TILE_URL` / `MESHSAT_MAP_TILE_ATTRIBUTION` to use a licensed key.
+ */
+const DEFAULT_TILE_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}";
+const DEFAULT_TILE_ATTRIBUTION =
+  '&copy; <a href="https://www.esri.com/">Esri</a>, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, ' +
+  'Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, ' +
+  '&copy; OpenStreetMap contributors, and the GIS User Community';
+
+function mapTileUrl(): string {
+  return process.env.MESHSAT_MAP_TILE_URL?.trim() || DEFAULT_TILE_URL;
+}
+
+function mapTileAttribution(): string {
+  return process.env.MESHSAT_MAP_TILE_ATTRIBUTION?.trim() || DEFAULT_TILE_ATTRIBUTION;
+}
+
+/** Swap the upstream basemap URL/attribution without touching MeshSat's VPS. */
+export function applyTileSource(html: string): string {
+  const tileUrl = mapTileUrl();
+  const attribution = mapTileAttribution();
+
+  let out = html.replace(
+    /https?:\/\/[^"'\s)]*openstreetmap[^"'\s)]*\/\{z\}\/\{x\}\/\{y\}[^"'\s)]*\.png/gi,
+    () => tileUrl,
+  );
+  out = out.replace(/attribution:\s*(['"])(.*?)\1/gi, (match, quote: string, value: string) => {
+    if (!/openstreetmap/i.test(value)) return match;
+    const escaped = quote === "'" ? attribution.replace(/'/g, "\\'") : attribution.replace(/"/g, '\\"');
+    return `attribution: ${quote}${escaped}${quote}`;
+  });
+  return out;
+}
+
+/**
+ * Lightweight session roll-forward. The SPA calls this with a fresh access token
+ * after it refreshes so the map's HttpOnly cookie is renewed without reloading
+ * the iframe (which would reset the user's map position).
+ */
+router.get("/session", requireMapAuth, (_req: Request, res: ExpressResponse) => {
+  res.status(204).end();
+});
 
 // Proxy every GET under /api/meshsat-map, preserving the sub-path and query string.
 router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
@@ -186,11 +242,16 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
   res.status(upstream.status);
   const headers = sanitizeUpstreamHeaders(upstream.headers);
   for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+  // OSM's tile service returns an "access blocked" placeholder for requests that
+  // carry a Referer from this deployment. The map document's policy governs its
+  // tile/subresource requests, so suppress the Referer explicitly (rather than
+  // relying on helmet's default) to keep the basemap visible.
+  res.setHeader("referrer-policy", "no-referrer");
 
   const contentType = upstream.headers.get("content-type") || "";
   if (contentType.includes("text/html")) {
     const html = await upstream.text();
-    res.send(rewriteMeshSatUrls(html, origin));
+    res.send(applyTileSource(rewriteMeshSatUrls(html, origin)));
     return;
   }
 

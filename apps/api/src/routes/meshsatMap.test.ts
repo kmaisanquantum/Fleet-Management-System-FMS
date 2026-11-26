@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest
 import express from "express";
 import type { Server } from "http";
 import { signAccessToken, AuthUser } from "../middleware/auth";
-import meshsatMapRouter from "./meshsatMap";
+import meshsatMapRouter, { applyTileSource } from "./meshsatMap";
 
 /**
  * Tests for `GET /api/meshsat-map/*` — the server-side proxy that injects the
@@ -199,5 +199,94 @@ describe("MeshSat map proxy", () => {
     const cookie = res.headers.get("set-cookie") || "";
     expect(cookie).toContain("fms_map_token=");
     expect(cookie).toContain("HttpOnly");
+  });
+
+  it("falls back to a valid cookie when the iframe URL carries a stale/invalid token", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map?fms_token=expired.token.value`, {
+      headers: { Cookie: `fms_map_token=${fmsToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rolls the map session cookie forward at /session without calling upstream", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response("should not be fetched", { status: 200, headers: { "content-type": "text/plain" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/session?fms_token=${fmsToken}`);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("set-cookie") || "").toContain("fms_map_token=");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not forward an upstream Set-Cookie onto the FMS origin", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () =>
+        new Response("ok", {
+          status: 200,
+          headers: { "content-type": "text/plain", "set-cookie": "upstream_session=abc; Path=/" },
+        }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie") || "").not.toContain("upstream_session");
+  });
+
+  it("serves the map HTML with a non-OSM basemap", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () =>
+        new Response(
+          `<html><script>L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);</script></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        ),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("arcgisonline.com");
+    expect(html).not.toContain("tile.openstreetmap.org");
+  });
+});
+
+describe("applyTileSource", () => {
+  const originalUrl = process.env.MESHSAT_MAP_TILE_URL;
+  const originalAttribution = process.env.MESHSAT_MAP_TILE_ATTRIBUTION;
+
+  afterEach(() => {
+    if (originalUrl === undefined) delete process.env.MESHSAT_MAP_TILE_URL;
+    else process.env.MESHSAT_MAP_TILE_URL = originalUrl;
+    if (originalAttribution === undefined) delete process.env.MESHSAT_MAP_TILE_ATTRIBUTION;
+    else process.env.MESHSAT_MAP_TILE_ATTRIBUTION = originalAttribution;
+  });
+
+  const html = `<script>L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);</script>`;
+
+  it("replaces blocked OSM tiles with the default CDN provider and attribution", () => {
+    const out = applyTileSource(html);
+    expect(out).toContain(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    );
+    expect(out).not.toContain("tile.openstreetmap.org");
+    expect(out).toContain("Esri");
+  });
+
+  it("honours MESHSAT_MAP_TILE_URL and MESHSAT_MAP_TILE_ATTRIBUTION", () => {
+    process.env.MESHSAT_MAP_TILE_URL = "https://tiles.example.test/{z}/{x}/{y}.png";
+    process.env.MESHSAT_MAP_TILE_ATTRIBUTION = "&copy; Example Maps";
+    const out = applyTileSource(html);
+    expect(out).toContain("https://tiles.example.test/{z}/{x}/{y}.png");
+    expect(out).toContain("&copy; Example Maps");
+    expect(out).not.toContain("tile.openstreetmap.org");
   });
 });
