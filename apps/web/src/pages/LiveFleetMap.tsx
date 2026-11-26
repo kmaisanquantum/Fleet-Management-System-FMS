@@ -104,12 +104,11 @@ export default function LiveFleetMap() {
       {/* Page Title */}
       <div>
         <h1 className="text-2xl font-bold text-ink-100">Live Fleet Map</h1>
-        <p className="text-sm text-ink-400">Live vehicle tracking provided by the MeshSat map</p>
       </div>
 
       {missingAuth && (
         <p className="text-sm text-amber-400">
-          Sign in to load the live map — the MeshSat map is proxied through the FMS and requires an
+          Sign in to load the live map — the map is proxied through the FMS and requires an
           authenticated session.
         </p>
       )}
@@ -117,7 +116,7 @@ export default function LiveFleetMap() {
       {/* MeshSat map (embedded via the FMS proxy) */}
       <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
         {mapUrl ? (
-          <iframe src={mapUrl} title="MeshSat Live Map" className="w-full h-full border-0" />
+          <iframe src={mapUrl} title="Live Fleet Map" className="w-full h-full border-0" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-ink-400 text-sm">
             {missingAuth ? "Live map unavailable" : "Loading live map…"}
