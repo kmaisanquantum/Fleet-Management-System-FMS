@@ -109,7 +109,10 @@ export function requireMapAuth(req: Request, res: ExpressResponse, next: NextFun
   for (const candidate of candidates) {
     try {
       req.user = verifyAccessToken(candidate.token);
-      if (candidate.fromQuery) {
+      // A query token (iframe navigation) and the dedicated /session call both
+      // establish the cookie. The SPA uses /session with a Bearer header so the
+      // JWT never has to appear in the iframe URL or proxy access logs.
+      if (candidate.fromQuery || req.path === "/session") {
         res.cookie(MAP_COOKIE_NAME, candidate.token, {
           httpOnly: true,
           sameSite: "lax",
@@ -230,8 +233,8 @@ export function applyTileSource(html: string): string {
 
 /**
  * Adds a small same-origin client shim to the proxied map document:
- *  - forwards the iframe's `?fms_token=` to its own `/api/meshsat-map/*` fetch
- *    calls, so polling keeps working when a browser blocks the HttpOnly cookie;
+ *  - keeps the legacy `?fms_token=` fallback for clients that still put the JWT
+ *    in the iframe URL (normal sessions authenticate with the HttpOnly cookie);
  *  - falls back from the Esri Street basemap to Esri Topo and then OSM if a
  *    tile fails, instead of leaving broken-tile errors in the map;
  *  - notifies the parent FMS page about auth/tile failures so it can show a
@@ -302,6 +305,45 @@ export function injectMapClientHardening(html: string): string {
  */
 router.get("/session", requireMapAuth, (_req: Request, res: ExpressResponse) => {
   res.status(204).end();
+});
+
+/**
+ * Lightweight availability probe for the SPA. It never proxies the full map
+ * document, so the client can decide between the MeshSat iframe and the native
+ * FMS map without a double page load. `MESHSAT_MAP_AUTH` being absent is
+ * reported as unavailable rather than surfacing a blank iframe.
+ */
+router.get("/health", requireMapAuth, async (_req: Request, res: ExpressResponse) => {
+  const authorization = upstreamAuthorization();
+  if (!authorization) {
+    return res.status(503).json({
+      available: false,
+      configured: false,
+      reason: "MESHSAT_MAP_AUTH is not configured; using the FMS live map.",
+    });
+  }
+  try {
+    const upstream = await fetch(`${mapOrigin()}/map`, {
+      method: "GET",
+      headers: { authorization, "user-agent": PROXY_USER_AGENT },
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!upstream.ok) {
+      return res.status(503).json({
+        available: false,
+        configured: true,
+        status: upstream.status,
+        reason: `MeshSat map returned HTTP ${upstream.status}; using the FMS live map.`,
+      });
+    }
+    return res.json({ available: true, configured: true });
+  } catch {
+    return res.status(503).json({
+      available: false,
+      configured: true,
+      reason: "MeshSat map is unreachable; using the FMS live map.",
+    });
+  }
 });
 
 /**

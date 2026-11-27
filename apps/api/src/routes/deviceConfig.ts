@@ -1,7 +1,8 @@
+import { createHash } from "crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { db } from "../db";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, verifyAccessToken } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
@@ -11,6 +12,7 @@ import {
   COMMAND_ROLES,
   commandAuditAction,
   dispatchDeviceCommand,
+  fetchBridgeDevices,
   IGNITION_CUT_SPEED_LIMIT_KMH,
   latestSpeedKmh,
   normalizeCommandStatus,
@@ -21,11 +23,17 @@ import {
   ConfigValue,
   ResolvedParameter,
   findPreset,
+  getDeviceInfoSnapshot,
   lookupFeatureParam,
   resolvePreset,
   resolveRawParameter,
   resolveReadTarget,
 } from "../services/deviceConfig";
+import {
+  TELTONIKA_FIELDS,
+  TELTONIKA_LOAD_PARAM_IDS,
+  teltonikaRegistryPayload,
+} from "../services/teltonikaRegistry";
 
 /**
  * Remote Teltonika FMB125 configuration.
@@ -70,7 +78,7 @@ const configBodySchema = writeBodySchema
     /** Convenience alias for numeric reads. */
     param_ids: z.array(z.number().int().positive()).optional(),
     /** Read-only diagnostic command. `getparam` requires `read`/`param_ids`. */
-    diagnostic: z.enum(["getinfo", "getgps", "getver", "getstatus", "readio", "getparam"]).optional(),
+    diagnostic: z.enum(["getinfo", "getgps", "getver", "getstatus", "getio", "readio", "getparam"]).optional(),
   })
   .refine(
     (body) =>
@@ -91,6 +99,7 @@ const commandBodySchema = z
         "getver",
         "getstatus",
         "getgps",
+        "getio",
         "readio",
         "getparam",
         "setparam",
@@ -285,6 +294,344 @@ async function queueWrites(
   return results;
 }
 
+/** Stable short hash of the last applied parameter values. */
+function configVersionFor(imei: string): string | null {
+  const rows = db
+    .prepare("SELECT param_id, applied_value FROM device_config_state WHERE imei = ? AND status = 'applied' ORDER BY param_id")
+    .all(imei) as { param_id: number; applied_value: string | null }[];
+  if (rows.length === 0) return null;
+  const hash = createHash("sha1")
+    .update(rows.map((row) => `${row.param_id}=${row.applied_value ?? ""}`).join("|"))
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+  return `CFG-${hash}`;
+}
+
+function loadParameterStates(imei: string) {
+  return db
+    .prepare(`
+      SELECT param_id, feature_key, value, desired_value, applied_value,
+             status, command_id, requested_at, applied_at, response_text,
+             preset_key, preset_metadata, updated_at
+      FROM device_config_state
+      WHERE imei = ?
+      ORDER BY param_id ASC
+    `)
+    .all(imei);
+}
+
+async function dispatchAndAudit(input: {
+  imei: string;
+  vehicleId: string;
+  userId: string;
+  commandType: "diagnostic" | "raw";
+  payload: Record<string, unknown>;
+  reason: string | null;
+  action?: string;
+}) {
+  const result = await dispatchDeviceCommand({
+    imei: input.imei,
+    vehicleId: input.vehicleId,
+    commandType: input.commandType,
+    payload: input.payload,
+    requestedBy: input.userId,
+    reason: input.reason,
+  });
+  writeAudit({
+    userId: input.userId,
+    action: input.action ?? "DEVICE_COMMAND_QUEUED",
+    entity: "device_commands",
+    entityId: result.id,
+    newValue: {
+      imei: input.imei,
+      vehicle_id: input.vehicleId,
+      command_type: input.commandType,
+      payload: input.payload,
+      reason: input.reason,
+    },
+  });
+  return result;
+}
+
+/**
+ * GET /api/devices — local device inventory for the IMEI selector. MeshSat's
+ * authoritative online state is available separately through `GET /bridge`.
+ */
+router.get("/", requireAuth, (req, res, next) => {
+  try {
+    const scope = resolveClientScopes(req.user);
+    let sql = `
+      SELECT d.device_identifier AS imei, d.device_model, d.vehicle_id, d.client_id,
+             d.last_seen_at, d.firmware_version,
+             v.vehicle_number, v.registration_number
+      FROM gps_devices d
+      LEFT JOIN vehicles v ON v.id = d.vehicle_id
+    `;
+    const params: string[] = [];
+    if (scope) {
+      sql += ` WHERE d.client_id IN (${scope.map(() => "?").join(", ")})`;
+      params.push(...scope);
+    }
+    sql += " ORDER BY v.vehicle_number ASC, d.device_identifier ASC";
+    const rows = db.prepare(sql).all(...params) as any[];
+    res.json({
+      data: rows.map((row) => ({
+        ...row,
+        online: isDeviceOnline(row.last_seen_at),
+      })),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** GET /api/devices/registry — central Teltonika parameter dictionary. */
+router.get("/registry", requireAuth, (_req, res) => {
+  res.json({ data: teltonikaRegistryPayload() });
+});
+
+/** GET /api/devices/bridge — proxy MeshSat's GET /api/devices inventory. */
+router.get("/bridge", requireAuth, requireRole(...COMMAND_ROLES), async (_req, res, next) => {
+  try {
+    const result = await fetchBridgeDevices();
+    if (!result.configured) {
+      return res.status(503).json({ error: result.text, configured: false });
+    }
+    if (!result.ok) {
+      return res.status(result.status || 502).json({
+        error: "MeshSat bridge device inventory unavailable",
+        detail: result.text,
+        configured: true,
+      });
+    }
+    res.json({ data: result.data });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * POST /api/devices/:imei/load
+ *
+ * Dispatches `getinfo`, `getver`, `getstatus`, `getio`, and `getparam` for the
+ * active registry parameters. Tracker replies arrive asynchronously through
+ * the bridge ack callback and populate `device_config_state`.
+ */
+const loadBodySchema = z.object({
+  param_ids: z.array(z.number().int().positive()).max(200).optional(),
+  reason: z.string().optional(),
+});
+
+router.post("/:imei/load", requireAuth, requireRole(...COMMAND_ROLES), async (req, res, next) => {
+  try {
+    const parsed = loadBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid load payload", details: parsed.error.flatten() });
+    }
+    const imei = req.params.imei;
+    const device = loadDevice(imei);
+    const denied = assertDeviceAccess(device, req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const reason = (parsed.data.reason ?? "Load configuration from device").trim();
+    const paramIds = [...new Set(parsed.data.param_ids ?? TELTONIKA_LOAD_PARAM_IDS)].slice(0, 150);
+    const results: any[] = [];
+
+    for (const command of ["getinfo", "getver", "getstatus", "getio"]) {
+      const result = await dispatchAndAudit({
+        imei,
+        vehicleId: device!.vehicle_id!,
+        userId: req.user!.id,
+        commandType: "diagnostic",
+        payload: { type: "diagnostic", command },
+        reason,
+      });
+      results.push({
+        id: result.id,
+        command: result.serialized,
+        status: normalizeCommandStatus(result.status),
+        queued: result.queued,
+      });
+    }
+
+    for (let offset = 0; offset < paramIds.length; offset += 8) {
+      const chunk = paramIds.slice(offset, offset + 8);
+      const chunkResults = await Promise.all(
+        chunk.map((paramId) =>
+          dispatchAndAudit({
+            imei,
+            vehicleId: device!.vehicle_id!,
+            userId: req.user!.id,
+            commandType: "diagnostic",
+            payload: { type: "getparam", param_id: paramId },
+            reason,
+          })
+        )
+      );
+      for (const result of chunkResults) {
+        results.push({
+          id: result.id,
+          command: result.serialized,
+          status: normalizeCommandStatus(result.status),
+          queued: result.queued,
+        });
+      }
+    }
+
+    res.status(201).json({
+      data: { commands: results, param_ids: paramIds },
+      message: `Load requested: 4 identity commands and ${paramIds.length} parameter reads queued. Values update as the tracker replies.`,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** POST /api/devices/:imei/read-records — flush/read the latest AVL state. */
+const readRecordsBodySchema = z.object({ reason: z.string().optional() });
+
+router.post("/:imei/read-records", requireAuth, requireRole(...COMMAND_ROLES), async (req, res, next) => {
+  try {
+    const parsed = readRecordsBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid read-records payload", details: parsed.error.flatten() });
+    }
+    const imei = req.params.imei;
+    const device = loadDevice(imei);
+    const denied = assertDeviceAccess(device, req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const reason = (parsed.data.reason ?? "Read latest records").trim();
+    const commands: any[] = [];
+    for (const command of ["getgps", "getstatus", "getio"]) {
+      const result = await dispatchAndAudit({
+        imei,
+        vehicleId: device!.vehicle_id!,
+        userId: req.user!.id,
+        commandType: "diagnostic",
+        payload: { type: "diagnostic", command },
+        reason,
+      });
+      commands.push({ id: result.id, command: result.serialized, status: normalizeCommandStatus(result.status) });
+    }
+
+    const latest = db
+      .prepare("SELECT * FROM telemetry_records WHERE imei = ? ORDER BY recorded_at DESC LIMIT 1")
+      .get(imei) as Record<string, unknown> | undefined;
+
+    res.status(201).json({
+      data: { commands, latest_record: latest ?? null },
+      message: "Record flush requested. The latest AVL state is returned now; fresh records appear after the tracker's next sync.",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** POST /api/devices/:imei/reboot — guarded `cpureset`. */
+const rebootBodySchema = z.object({
+  confirm: z.literal(true),
+  reason: z.string().optional(),
+});
+
+router.post("/:imei/reboot", requireAuth, requireRole(...COMMAND_ROLES), async (req, res, next) => {
+  try {
+    const parsed = rebootBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Explicit confirmation is required to reboot the device" });
+    }
+    const imei = req.params.imei;
+    const device = loadDevice(imei);
+    const denied = assertDeviceAccess(device, req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const reason = (parsed.data.reason ?? "Device reboot confirmed by operator").trim();
+    const result = await dispatchAndAudit({
+      imei,
+      vehicleId: device!.vehicle_id!,
+      userId: req.user!.id,
+      commandType: "raw",
+      payload: { type: "raw", command: "cpureset" },
+      reason,
+      action: "DEVICE_REBOOT_QUEUED",
+    });
+
+    res.status(201).json({
+      data: { id: result.id, command: result.serialized, status: normalizeCommandStatus(result.status), queued: result.queued },
+      message: "Reboot command queued. The tracker restarts on its next MeshSat sync.",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/devices/:imei/events — Server-Sent Events snapshot stream.
+ * The client reads this with `fetch` so the bearer token stays in the
+ * Authorization header and never appears in a URL or proxy access log.
+ */
+router.get("/:imei/events", (req, res, next) => {
+  try {
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    if (!token) return res.status(401).json({ error: "Missing bearer token" });
+    try {
+      req.user = verifyAccessToken(token);
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
+    const imei = req.params.imei;
+    const device = loadDevice(imei);
+    const denied = assertDeviceAccess(device, req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders?.();
+
+    let previous = "";
+    const send = () => {
+      const latest = db
+        .prepare("SELECT MAX(updated_at) AS updated_at FROM device_config_state WHERE imei = ?")
+        .get(imei) as { updated_at: string | null } | undefined;
+      const lastCommand = db
+        .prepare("SELECT MAX(updated_at) AS updated_at FROM device_commands WHERE imei = ?")
+        .get(imei) as { updated_at: string | null } | undefined;
+      const queued = db
+        .prepare("SELECT COUNT(*) AS count FROM device_commands WHERE imei = ? AND status = 'queued'")
+        .get(imei) as { count: number };
+      const snapshot = {
+        imei,
+        online: isDeviceOnline(device!.last_seen_at),
+        last_seen_at: device!.last_seen_at,
+        queued_count: queued.count,
+        config_updated_at: latest?.updated_at ?? null,
+        command_updated_at: lastCommand?.updated_at ?? null,
+        config_version: configVersionFor(imei),
+      };
+      const serialized = JSON.stringify(snapshot);
+      if (serialized !== previous) {
+        previous = serialized;
+        res.write(`event: snapshot\ndata: ${serialized}\n\n`);
+      } else {
+        res.write(": keep-alive\n\n");
+      }
+    };
+
+    send();
+    const interval = setInterval(send, 3000);
+    req.on("close", () => clearInterval(interval));
+  } catch (e) {
+    next(e);
+  }
+});
+
 /** GET /api/devices/:imei/config — current state, mapped presets, recent commands. */
 router.get("/:imei/config", requireAuth, (req, res, next) => {
   try {
@@ -298,6 +645,8 @@ router.get("/:imei/config", requireAuth, (req, res, next) => {
       .get(device!.vehicle_id) as
       | { vehicle_number: string; registration_number: string; last_seen_at: string | null }
       | undefined;
+    const deviceInfo = getDeviceInfoSnapshot(imei);
+    const parameterStates = loadParameterStates(imei);
 
     const parameters = db
       .prepare(`
@@ -347,11 +696,17 @@ router.get("/:imei/config", requireAuth, (req, res, next) => {
         last_seen_at: vehicle?.last_seen_at ?? null,
         device_last_seen_at: device!.last_seen_at ?? null,
         online: isDeviceOnline(device!.last_seen_at),
+        firmware_version: deviceInfo.firmware_version,
+        config_version: configVersionFor(imei),
+        device_info: deviceInfo.info,
+        device_info_updated_at: deviceInfo.updated_at,
         last_applied_at: lastApplied?.applied_at ?? null,
         last_sync_info: lastInfo?.response_text ?? null,
         last_sync_at: lastInfo?.acked_at ?? lastInfo?.created_at ?? null,
         queued_count: queuedCount,
         parameters,
+        parameter_states: parameterStates,
+        registry_param_count: TELTONIKA_FIELDS.length,
         presets: configPresetsForResponse(),
         commands,
         command_history: commands,
@@ -506,7 +861,7 @@ router.post("/:imei/command", requireAuth, requireRole(...COMMAND_ROLES), async 
     const body = parsed.data;
     const reason = (body.reason ?? "").trim() || null;
     const action = body.type ?? body.command ?? "";
-    const diagnostic = new Set(["getinfo", "getver", "getstatus", "getgps", "readio", "getparam"]);
+    const diagnostic = new Set(["getinfo", "getver", "getstatus", "getgps", "getio", "readio", "getparam"]);
 
     let built: ReturnType<typeof buildCommand>;
     let commandType: string;

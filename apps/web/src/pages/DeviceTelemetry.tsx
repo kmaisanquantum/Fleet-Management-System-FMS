@@ -457,7 +457,15 @@ export default function DeviceTelemetry() {
             <div className="text-xs text-ink-500 mt-1">Last updated {lastRefresh.toLocaleTimeString()} · auto-refresh every 15s</div>
           )}
         </div>
-        <Link to="/telemetry" className="btn-secondary text-xs px-3 py-2">&larr; Back to live status</Link>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            to={`/telemetry/device/${encodeURIComponent(device.imei)}/configurator`}
+            className="btn-primary text-xs px-3 py-2"
+          >
+            Open Configurator Workspace
+          </Link>
+          <Link to="/telemetry" className="btn-secondary text-xs px-3 py-2">&larr; Back to live status</Link>
+        </div>
       </div>
 
       {error && <div className="p-4 rounded-lg bg-signal-red/10 text-signal-red text-sm">{error}</div>}

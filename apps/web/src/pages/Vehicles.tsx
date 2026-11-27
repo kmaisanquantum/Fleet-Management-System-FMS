@@ -436,6 +436,14 @@ export default function Vehicles() {
                 </td>
                 <td className="px-4 py-3 text-right">
                   <div className="flex items-center justify-end gap-2">
+                    {imei && (
+                      <Link
+                        to={`/telemetry/device/${encodeURIComponent(imei)}/configurator`}
+                        className="px-2 py-1 text-xs font-medium text-sky-400 hover:text-sky-300 hover:bg-base-800 rounded"
+                      >
+                        Configure
+                      </Link>
+                    )}
                     <button className="px-2 py-1 text-xs font-medium text-amber-400 hover:text-amber-300 hover:bg-base-800 rounded" onClick={() => handleOpenEdit(v)}>Edit</button>
                     <button className="px-2 py-1 text-xs font-medium text-rose-400 hover:text-rose-300 hover:bg-base-800 rounded" onClick={() => handleDelete(v)}>Delete</button>
                   </div>

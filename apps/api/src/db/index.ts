@@ -114,6 +114,11 @@ function migrateExistingDatabase() {
   addColumn("gps_devices", "capabilities", "TEXT");
   addColumn("gps_devices", "last_seen_at", "TEXT");
 
+  // gps_devices — latest tracker identity replies for the configurator header.
+  addColumn("gps_devices", "firmware_version", "TEXT");
+  addColumn("gps_devices", "device_info_json", "TEXT");
+  addColumn("gps_devices", "device_info_updated_at", "TEXT");
+
   // io_feature_map / param_map — per-model mapping + engineering unit label.
   addColumn("io_feature_map", "device_model", "TEXT");
   addColumn("io_feature_map", "unit", "TEXT");
