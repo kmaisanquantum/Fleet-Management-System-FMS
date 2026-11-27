@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Vehicle, VehicleMaintenance } from "../types";
 
@@ -78,7 +79,11 @@ export default function VehicleMaintenancePage() {
           <tbody className="divide-y divide-base-800 text-ink-200">
             {Array.isArray(maintenanceRecords) && maintenanceRecords.map((m) => (
               <tr key={m.id} className="hover:bg-base-800/50">
-                <td className="px-4 py-3 font-semibold text-amber-400">{m.vehicle_number}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/vehicles/${m.vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                    {m.vehicle_number}
+                  </Link>
+                </td>
                 <td className="px-4 py-3">{m.maintenance_type.replace("_", " ")}</td>
                 <td className="px-4 py-3">{m.description}</td>
                 <td className="px-4 py-3">{m.scheduled_date || "—"}</td>

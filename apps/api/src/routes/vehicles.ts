@@ -5,6 +5,11 @@ import { db } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { writeAudit } from "../utils/audit";
+import {
+  AssignmentError,
+  VEHICLE_ACTIVE_DRIVER_JOIN,
+  assignDriverToVehicle,
+} from "../services/vehicleAssignments";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,21 +20,27 @@ const GPS_DEVICE_TYPES = ["meshsat", "teltonika"] as const;
 const GPS_DEVICE_MODELS = ["FMB125", "FMC130", "FMC650", "FMB920", "DUALCAM"] as const;
 const GPS_DEVICE_STATUSES = ["active", "inactive", "maintenance"] as const;
 
-/** Columns added to every vehicle read so the register can show its tracker. */
-const VEHICLE_WITH_GPS_SELECT = `
+/** Vehicle row plus its tracker and currently assigned driver, when present. */
+const VEHICLE_SELECT = `
   SELECT
     v.*,
     gd.device_identifier AS gps_imei,
     gd.device_type AS gps_device_type,
     gd.device_model AS gps_device_model,
-    gd.status AS gps_device_status
+    gd.status AS gps_device_status,
+    va_active.id AS assignment_id,
+    va_active.driver_id AS assigned_driver_id,
+    d_active.name AS assigned_driver_name,
+    d_active.employee_number AS assigned_driver_employee_number,
+    va_active.allocation_date AS assigned_since
   FROM vehicles v
   LEFT JOIN gps_devices gd ON gd.id = v.gps_device_id
+  ${VEHICLE_ACTIVE_DRIVER_JOIN}
 `;
 
 router.get("/", (req, res) => {
   const { status, department } = req.query;
-  let query = `${VEHICLE_WITH_GPS_SELECT} WHERE 1=1`;
+  let query = `${VEHICLE_SELECT} WHERE 1=1`;
   const params: any[] = [];
   if (status) {
     query += " AND v.status = ?";
@@ -45,7 +56,7 @@ router.get("/", (req, res) => {
 });
 
 router.get("/:id", (req, res) => {
-  const vehicle = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id);
+  const vehicle = db.prepare(`${VEHICLE_SELECT} WHERE v.id = ?`).get(req.params.id);
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
   res.json({ data: vehicle });
 });
@@ -65,11 +76,16 @@ router.get("/:id/intelligence", (req, res, next) => {
         gd.device_identifier,
         gd.device_type AS gps_device_type,
         gd.device_model AS gps_device_model,
-        gd.status AS gps_device_status
+        gd.status AS gps_device_status,
+        va_active.driver_id AS assigned_driver_id,
+        d_active.name AS assigned_driver_name,
+        d_active.employee_number AS assigned_driver_employee_number,
+        va_active.allocation_date AS assigned_since
       FROM vehicles v
       LEFT JOIN vehicle_status_view vsv ON vsv.vehicle_id = v.id
       LEFT JOIN fuel_cards fc ON fc.id = v.fuel_card_id
       LEFT JOIN gps_devices gd ON gd.id = v.gps_device_id
+      ${VEHICLE_ACTIVE_DRIVER_JOIN}
       WHERE v.id = ?
     `).get(vehicleId) as any;
 
@@ -328,7 +344,7 @@ router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
     createVehicle();
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_CREATED", entity: "vehicles", entityId: id, newValue: input });
-    const created = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(id);
+    const created = db.prepare(`${VEHICLE_SELECT} WHERE v.id = ?`).get(id);
     res.status(201).json({ data: created });
   } catch (e) { next(e); }
 });
@@ -394,9 +410,20 @@ router.put("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
     updateVehicle();
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_UPDATED", entity: "vehicles", entityId: req.params.id, previousValue: existing, newValue: input });
-    const updated = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id);
+    const updated = db.prepare(`${VEHICLE_SELECT} WHERE v.id = ?`).get(req.params.id);
     res.json({ data: updated });
   } catch (e) { next(e); }
+});
+
+router.put("/:id/driver", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
+  try {
+    const { driverId } = z.object({ driverId: z.string().min(1).nullable() }).parse(req.body);
+    const assignment = assignDriverToVehicle(req.params.id, driverId, req.user!.id);
+    res.json({ data: assignment });
+  } catch (e) {
+    if (e instanceof AssignmentError) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
 });
 
 router.patch("/:id/status", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
@@ -404,7 +431,7 @@ router.patch("/:id/status", requireRole(...FLEET_WRITE_ROLES), (req, res, next) 
     const { status } = z.object({ status: z.enum(["active", "inactive", "under_repair", "disposed"]) }).parse(req.body);
     db.prepare("UPDATE vehicles SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, req.params.id);
     writeAudit({ userId: req.user!.id, action: "VEHICLE_STATUS_CHANGED", entity: "vehicles", entityId: req.params.id, newValue: { status } });
-    res.json({ data: db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id) });
+    res.json({ data: db.prepare(`${VEHICLE_SELECT} WHERE v.id = ?`).get(req.params.id) });
   } catch (e) { next(e); }
 });
 

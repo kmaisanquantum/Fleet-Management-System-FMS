@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { apiGet } from "../api/client";
 
 interface DriverProfile {
@@ -10,6 +11,9 @@ interface DriverProfile {
   licenceClass: string;
   licenceExpiry: string;
   authorisationStatus: string;
+  assignedVehicleId: string | null;
+  assignedVehicleNumber: string | null;
+  assignedVehicleRegistration: string | null;
   assignedVehicle: string;
   metrics: {
     safetyScore: number;
@@ -91,12 +95,25 @@ export default function DriverIntelligence() {
           <div className="col-span-2 text-center p-8 text-ink-400">Loading driver scorecards…</div>
         ) : (
           data.map((driver) => (
-            <div key={driver.id} className="bg-base-900 border border-base-700 rounded-xl p-5 space-y-4">
+            <div key={driver.id} id={`driver-${driver.id}`} className="bg-base-900 border border-base-700 rounded-xl p-5 space-y-4">
               <div className="flex items-start justify-between">
                 <div>
                   <div className="text-xs text-amber-400 font-mono font-semibold">{driver.employeeNumber}</div>
-                  <h3 className="text-lg font-bold text-ink-100">{driver.name}</h3>
-                  <div className="text-xs text-ink-400">{driver.department} | {driver.assignedVehicle}</div>
+                  <h3 className="text-lg font-bold text-ink-100">
+                    <Link to={`/drivers/${driver.id}`} className="hover:text-amber-300">
+                      {driver.name}
+                    </Link>
+                  </h3>
+                  <div className="text-xs text-ink-400">
+                    {driver.department} |{" "}
+                    {driver.assignedVehicleId ? (
+                      <Link to={`/vehicles/${driver.assignedVehicleId}`} className="text-amber-400 hover:text-amber-300">
+                        {driver.assignedVehicleNumber}
+                      </Link>
+                    ) : (
+                      "Unassigned"
+                    )}
+                  </div>
                 </div>
                 <div className="text-right">
                   <div className={`text-2xl font-bold ${

@@ -1,9 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
-import { Driver } from "../types";
+import { Driver, Vehicle } from "../types";
 
 export default function Drivers() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -14,10 +16,17 @@ export default function Drivers() {
   const [licenceNumber, setLicenceNumber] = useState("");
   const [licenceClass, setLicenceClass] = useState("");
   const [licenceExpiry, setLicenceExpiry] = useState("");
+  const [assignedVehicleId, setAssignedVehicleId] = useState("");
 
   const fetchDrivers = () => {
-    api.get<{ data: Driver[] }>("/drivers")
-      .then((res) => setDrivers(res.data || []))
+    Promise.all([
+      api.get<{ data: Driver[] }>("/drivers"),
+      api.get<{ data: Vehicle[] }>("/vehicles"),
+    ])
+      .then(([drvRes, vehRes]) => {
+        setDrivers(drvRes.data || []);
+        setVehicles(vehRes.data || []);
+      })
       .catch(() => setDrivers([]))
       .finally(() => setLoading(false));
   };
@@ -34,6 +43,7 @@ export default function Drivers() {
     setLicenceNumber("");
     setLicenceClass("");
     setLicenceExpiry("");
+    setAssignedVehicleId("");
   };
 
   const handleOpenCreate = () => {
@@ -49,6 +59,7 @@ export default function Drivers() {
     setLicenceNumber(d.licence_number || "");
     setLicenceClass(d.licence_class || "");
     setLicenceExpiry(d.licence_expiry || "");
+    setAssignedVehicleId(d.assigned_vehicle_id || "");
     setShowModal(true);
   };
 
@@ -70,11 +81,25 @@ export default function Drivers() {
         authorisationStatus: "authorised",
       };
 
+      let driverId = editingId;
       if (editingId) {
         await api.put(`/drivers/${editingId}`, payload);
       } else {
-        await api.post("/drivers", payload);
+        const created = await api.post<{ data: Driver }>("/drivers", payload);
+        driverId = created.data.id;
       }
+
+      if (driverId) {
+        const currentVehicleId = editingId
+          ? drivers.find((d) => d.id === editingId)?.assigned_vehicle_id || ""
+          : "";
+        if (assignedVehicleId !== currentVehicleId) {
+          await api.put(`/drivers/${driverId}/vehicle`, {
+            vehicleId: assignedVehicleId || null,
+          });
+        }
+      }
+
       handleCloseModal();
       fetchDrivers();
     } catch (err: any) {
@@ -111,6 +136,7 @@ export default function Drivers() {
               <th className="px-4 py-3">Emp #</th>
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Department</th>
+              <th className="px-4 py-3">Assigned Vehicle</th>
               <th className="px-4 py-3">Licence #</th>
               <th className="px-4 py-3">Class</th>
               <th className="px-4 py-3">Expiry</th>
@@ -121,9 +147,29 @@ export default function Drivers() {
           <tbody className="divide-y divide-base-800 text-ink-200">
             {Array.isArray(drivers) && drivers.map((d) => (
               <tr key={d.id} className="hover:bg-base-800/50">
-                <td className="px-4 py-3 font-semibold text-amber-400">{d.employee_number}</td>
-                <td className="px-4 py-3 font-medium">{d.name}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/drivers/${d.id}`} className="text-amber-400 hover:text-amber-300">
+                    {d.employee_number}
+                  </Link>
+                </td>
+                <td className="px-4 py-3 font-medium">
+                  <Link to={`/drivers/${d.id}`} className="text-ink-100 hover:text-amber-300">
+                    {d.name}
+                  </Link>
+                </td>
                 <td className="px-4 py-3">{d.department || "—"}</td>
+                <td className="px-4 py-3">
+                  {d.assigned_vehicle_id ? (
+                    <Link to={`/vehicles/${d.assigned_vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                      {d.assigned_vehicle_number}
+                      {d.assigned_vehicle_registration ? (
+                        <span className="block text-[10px] text-ink-500">{d.assigned_vehicle_registration}</span>
+                      ) : null}
+                    </Link>
+                  ) : (
+                    <span className="text-xs text-ink-500">Unassigned</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 font-mono">{d.licence_number}</td>
                 <td className="px-4 py-3">{d.licence_class || "—"}</td>
                 <td className="px-4 py-3">{d.licence_expiry}</td>
@@ -141,7 +187,7 @@ export default function Drivers() {
               </tr>
             ))}
             {(!Array.isArray(drivers) || drivers.length === 0) && (
-              <tr><td colSpan={8} className="px-4 py-6 text-center text-ink-500">No drivers registered yet.</td></tr>
+              <tr><td colSpan={9} className="px-4 py-6 text-center text-ink-500">No drivers registered yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -173,6 +219,20 @@ export default function Drivers() {
                   <label className="label">Licence Expiry *</label>
                   <input className="input" type="date" value={licenceExpiry} onChange={(e) => setLicenceExpiry(e.target.value)} required />
                 </div>
+              </div>
+              <div>
+                <label className="label">Assigned Vehicle</label>
+                <select className="input" value={assignedVehicleId} onChange={(e) => setAssignedVehicleId(e.target.value)}>
+                  <option value="">Unassigned</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.vehicle_number} ({v.make} {v.model}){v.assigned_driver_id && v.assigned_driver_id !== editingId ? " — currently assigned" : ""}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[10px] text-ink-500">
+                  Assigning a vehicle creates an active allocation and releases the driver&apos;s previous vehicle.
+                </p>
               </div>
               <div className="flex justify-end gap-3 pt-3">
                 <button type="button" className="btn-ghost" onClick={handleCloseModal}>Cancel</button>

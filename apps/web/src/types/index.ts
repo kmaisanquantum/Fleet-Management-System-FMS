@@ -133,6 +133,11 @@ export interface Vehicle {
   gps_device_type: "meshsat" | "teltonika" | null;
   gps_device_model: "FMB125" | "FMC130" | "FMC650" | "FMB920" | "DUALCAM" | null;
   gps_device_status: "active" | "inactive" | "maintenance" | null;
+  assignment_id?: string | null;
+  assigned_driver_id?: string | null;
+  assigned_driver_name?: string | null;
+  assigned_driver_employee_number?: string | null;
+  assigned_since?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +153,11 @@ export interface Driver {
   authorisation_status: "authorised" | "suspended" | "revoked" | "pending";
   accident_history: string | null;
   training: string | null;
+  assignment_id?: string | null;
+  assigned_vehicle_id?: string | null;
+  assigned_vehicle_number?: string | null;
+  assigned_vehicle_registration?: string | null;
+  assigned_since?: string | null;
   created_at: string;
   updated_at: string;
 }

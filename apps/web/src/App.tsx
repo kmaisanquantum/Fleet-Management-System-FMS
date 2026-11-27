@@ -12,6 +12,7 @@ import VehicleDetail from "./pages/VehicleDetail";
 import DivisionConsumption from "./pages/DivisionConsumption";
 import Vehicles from "./pages/Vehicles";
 import Drivers from "./pages/Drivers";
+import DriverDetail from "./pages/DriverDetail";
 import VehicleAllocations from "./pages/VehicleAllocations";
 import VehicleFuelLogs from "./pages/VehicleFuelLogs";
 import VehicleTrips from "./pages/VehicleTrips";
@@ -90,6 +91,7 @@ function AppRoutes() {
           <Route path="/fleet-consumption" element={<DivisionConsumption />} />
           <Route path="/vehicles" element={<Vehicles />} />
           <Route path="/drivers" element={<Drivers />} />
+          <Route path="/drivers/:id" element={<DriverDetail />} />
           <Route path="/fleet-allocations" element={<VehicleAllocations />} />
           <Route path="/fleet-fuel" element={<VehicleFuelLogs />} />
           <Route path="/fleet-trips" element={<VehicleTrips />} />
