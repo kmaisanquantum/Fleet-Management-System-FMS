@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Vehicle, VehicleInspection } from "../types";
 
@@ -81,7 +82,11 @@ export default function VehicleInspections() {
             {Array.isArray(inspections) && inspections.map((i) => (
               <tr key={i.id} className="hover:bg-base-800/50">
                 <td className="px-4 py-3">{i.inspection_date}</td>
-                <td className="px-4 py-3 font-semibold text-amber-400">{i.vehicle_number}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/vehicles/${i.vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                    {i.vehicle_number}
+                  </Link>
+                </td>
                 <td className="px-4 py-3">{i.inspector_name}</td>
                 <td className="px-4 py-3">
                   <span className={`px-2 py-0.5 text-xs rounded font-medium ${

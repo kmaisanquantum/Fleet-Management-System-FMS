@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Driver, Vehicle, VehicleAllocation } from "../types";
 
@@ -74,17 +75,39 @@ export default function VehicleAllocations() {
               <th className="px-4 py-3">Custodian</th>
               <th className="px-4 py-3">Assigned Driver</th>
               <th className="px-4 py-3">Allocated Date</th>
+              <th className="px-4 py-3">Allocation Status</th>
               <th className="px-4 py-3">Approval Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-base-800 text-ink-200">
             {Array.isArray(allocations) && allocations.map((a) => (
               <tr key={a.id} className="hover:bg-base-800/50">
-                <td className="px-4 py-3 font-semibold text-amber-400">{a.vehicle_number}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/vehicles/${a.vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                    {a.vehicle_number}
+                  </Link>
+                </td>
                 <td className="px-4 py-3">{a.department || "—"}</td>
                 <td className="px-4 py-3">{a.custodian || "—"}</td>
-                <td className="px-4 py-3">{a.driver_name || "Unassigned"}</td>
+                <td className="px-4 py-3">
+                  {a.driver_id ? (
+                    <Link to={`/drivers/${a.driver_id}`} className="text-amber-400 hover:text-amber-300">
+                      {a.driver_name}
+                    </Link>
+                  ) : (
+                    "Unassigned"
+                  )}
+                </td>
                 <td className="px-4 py-3">{a.allocation_date}</td>
+                <td className="px-4 py-3">
+                  <span className={`px-2 py-0.5 text-xs rounded font-medium border ${
+                    a.authorisation_status === "active"
+                      ? "bg-emerald-950 text-emerald-400 border-emerald-800"
+                      : "bg-base-800 text-ink-400 border-base-700"
+                  }`}>
+                    {a.authorisation_status}
+                  </span>
+                </td>
                 <td className="px-4 py-3">
                   <span className="px-2 py-0.5 text-xs rounded font-medium bg-emerald-950 text-emerald-400 border border-emerald-800">
                     {a.approval_status}
@@ -93,7 +116,7 @@ export default function VehicleAllocations() {
               </tr>
             ))}
             {(!Array.isArray(allocations) || allocations.length === 0) && (
-              <tr><td colSpan={6} className="px-4 py-6 text-center text-ink-500">No vehicle allocations recorded.</td></tr>
+              <tr><td colSpan={7} className="px-4 py-6 text-center text-ink-500">No vehicle allocations recorded.</td></tr>
             )}
           </tbody>
         </table>

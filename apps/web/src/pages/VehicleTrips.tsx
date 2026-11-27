@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Driver, Vehicle, VehicleTrip } from "../types";
 
@@ -94,8 +95,20 @@ export default function VehicleTrips() {
             {Array.isArray(trips) && trips.map((t) => (
               <tr key={t.id} className="hover:bg-base-800/50">
                 <td className="px-4 py-3">{t.date}</td>
-                <td className="px-4 py-3 font-semibold text-amber-400">{t.vehicle_number}</td>
-                <td className="px-4 py-3">{t.driver_name || "—"}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/vehicles/${t.vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                    {t.vehicle_number}
+                  </Link>
+                </td>
+                <td className="px-4 py-3">
+                  {t.driver_id ? (
+                    <Link to={`/drivers/${t.driver_id}`} className="text-amber-400 hover:text-amber-300">
+                      {t.driver_name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )}
+                </td>
                 <td className="px-4 py-3">{t.start_location} → {t.destination}</td>
                 <td className="px-4 py-3">{t.purpose || "—"}</td>
                 <td className="px-4 py-3 font-mono">{t.begin_odometer.toLocaleString()}</td>

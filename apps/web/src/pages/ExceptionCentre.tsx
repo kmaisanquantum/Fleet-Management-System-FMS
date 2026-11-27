@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { apiGet, apiPatch } from "../api/client";
 
 interface FleetException {
@@ -232,8 +233,35 @@ export default function ExceptionCentre() {
                   </div>
                   <div className="text-sm font-medium text-ink-100">{exc.description}</div>
                   <div className="text-xs text-ink-400 flex flex-wrap gap-4">
-                    <span><strong>Vehicle:</strong> {exc.vehicle_number || "N/A"} ({exc.registration_number || ""})</span>
-                    <span><strong>Driver:</strong> {exc.driver_name || "Unassigned"}</span>
+                    <span>
+                      <strong>Vehicle:</strong>{" "}
+                      {exc.vehicle_id ? (
+                        <Link
+                          to={`/vehicles/${exc.vehicle_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-amber-400 hover:text-amber-300"
+                        >
+                          {exc.vehicle_number || exc.vehicle_id}
+                        </Link>
+                      ) : (
+                        "N/A"
+                      )}{" "}
+                      ({exc.registration_number || ""})
+                    </span>
+                    <span>
+                      <strong>Driver:</strong>{" "}
+                      {exc.driver_id ? (
+                        <Link
+                          to={`/drivers/${exc.driver_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-amber-400 hover:text-amber-300"
+                        >
+                          {exc.driver_name || exc.driver_id}
+                        </Link>
+                      ) : (
+                        "Unassigned"
+                      )}
+                    </span>
                     <span><strong>Logged:</strong> {new Date(exc.created_at).toLocaleString()}</span>
                   </div>
                 </div>

@@ -248,17 +248,50 @@ CREATE TABLE IF NOT EXISTS device_commands (
   vehicle_id TEXT REFERENCES vehicles(id),
   command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
   payload_json TEXT,
-  -- queued -> sent -> acknowledged, or failed / expired (TTL elapsed). 'acked'
-  -- is kept as a legacy synonym so pre-existing rows/readers continue to work.
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed', 'expired')),
+  -- Exact Codec 12 string sent to the bridge (e.g. `setparam 1580:80`).
+  raw_command TEXT,
+  -- queued -> sent -> applied, or failed / expired (TTL elapsed). 'acked' and
+  -- 'acknowledged' are legacy synonyms kept for existing rows/readers.
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'applied', 'acked', 'acknowledged', 'failed', 'expired')),
   requested_by TEXT REFERENCES users(id),
+  -- Alias of requested_by used by the bridge/audit contract.
+  created_by TEXT REFERENCES users(id),
   -- Operator-supplied justification (required for an ignition cut).
   reason TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   sent_at TEXT,
   response_text TEXT,
+  -- Structured/raw tracker response (mirrors response_text for the bridge API).
+  response_payload TEXT,
   -- Set when the tracker acknowledges the command (Codec 12 reply).
   acked_at TEXT
+);
+
+-- Latest known remote-configuration state per device parameter. `desired_value`
+-- is the latest requested value; `applied_value` is the last value confirmed by
+-- the tracker. The command trail remains in device_commands.
+CREATE TABLE IF NOT EXISTS device_config_state (
+  id TEXT PRIMARY KEY,
+  imei TEXT NOT NULL,
+  vehicle_id TEXT REFERENCES vehicles(id),
+  param_id INTEGER NOT NULL,
+  feature_key TEXT,
+  value TEXT,
+  desired_value TEXT,
+  applied_value TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'failed')),
+  command_id TEXT REFERENCES device_commands(id),
+  requested_by TEXT REFERENCES users(id),
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  applied_at TEXT,
+  response_text TEXT,
+  -- Preset metadata for writes applied through a named profile.
+  preset_key TEXT,
+  preset_metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (imei, param_id)
 );
 
 -- Media (camera stills, clips) captured by a device and reported by the relay
@@ -587,7 +620,7 @@ CREATE TABLE IF NOT EXISTS client_subscriptions (
 
 -- View for current vehicle status
 DROP VIEW IF EXISTS vehicle_status_view;
-CREATE VIEW vehicle_status_view AS
+CREATE VIEW IF NOT EXISTS vehicle_status_view AS
 SELECT
   v.id AS vehicle_id,
   v.vehicle_number,
@@ -626,6 +659,7 @@ CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);
 CREATE INDEX IF NOT EXISTS idx_telemetry_records_vehicle ON telemetry_records(vehicle_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_config_state_imei ON device_config_state(imei, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_media_device ON device_media(device_id, captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_media_captured ON device_media(captured_at DESC);
 -- Fleet-expansion indexes
@@ -671,4 +705,11 @@ INSERT OR IGNORE INTO param_map (id, feature_key, param_id, description) VALUES
   ('pm-idling-timeout',      'idling_timeout',        1581, 'Excessive idling timeout (seconds)'),
   ('pm-eco-driving',         'eco_driving_threshold', 1582, 'Eco (green) driving sensitivity'),
   ('pm-geofence-radius',     'geofence_radius',       2051, 'Auto geofence radius (metres)'),
-  ('pm-immobilizer-dout',    'immobilizer_dout',      1028, 'DOUT1 / immobiliser control');
+  ('pm-immobilizer-dout',    'immobilizer_dout',      1028, 'DOUT1 / immobiliser control'),
+  -- Remote-configuration presets. These are seeded defaults; verify the IDs
+  -- against the tracker firmware in Settings → Teltonika Parameter Map.
+  ('pm-reporting-interval',  'reporting_interval',    100,  'Periodic data-send interval (seconds)'),
+  ('pm-data-acq-ign-on',     'data_acquisition_ignition_on',  104, 'Data acquisition period with ignition ON (seconds)'),
+  ('pm-data-acq-ign-off',    'data_acquisition_ignition_off', 102, 'Data acquisition period with ignition OFF (seconds)'),
+  ('pm-ignition-source',     'ignition_source',       1000, 'Ignition source selection'),
+  ('pm-digital-output',      'digital_output_control', 1028, 'Digital output (DOUT1) control');

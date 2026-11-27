@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Driver, Vehicle, VehicleFuelLog } from "../types";
 
@@ -92,8 +93,20 @@ export default function VehicleFuelLogs() {
             {Array.isArray(logs) && logs.map((l) => (
               <tr key={l.id} className="hover:bg-base-800/50">
                 <td className="px-4 py-3">{l.date}</td>
-                <td className="px-4 py-3 font-semibold text-amber-400">{l.vehicle_number}</td>
-                <td className="px-4 py-3">{l.driver_name || "—"}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <Link to={`/vehicles/${l.vehicle_id}`} className="text-amber-400 hover:text-amber-300">
+                    {l.vehicle_number}
+                  </Link>
+                </td>
+                <td className="px-4 py-3">
+                  {l.driver_id ? (
+                    <Link to={`/drivers/${l.driver_id}`} className="text-amber-400 hover:text-amber-300">
+                      {l.driver_name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )}
+                </td>
                 <td className="px-4 py-3">{l.station || "—"}</td>
                 <td className="px-4 py-3 font-mono">{l.litres} L</td>
                 <td className="px-4 py-3 font-mono">K{l.cost_per_litre.toFixed(2)}</td>

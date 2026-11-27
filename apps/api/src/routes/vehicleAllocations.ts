@@ -46,26 +46,47 @@ router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
   try {
     const input = allocationSchema.parse(req.body);
     const id = uuid();
-    db.prepare(`
-      INSERT INTO vehicle_allocations (
-        id, vehicle_id, department, custodian, driver_id, allocation_date, return_date,
-        approval_status, authorisation_status, notes
-      ) VALUES (
-        @id, @vehicleId, @department, @custodian, @driverId, @allocationDate, @returnDate,
-        @approvalStatus, @authorisationStatus, @notes
-      )
-    `).run({
-      id,
-      vehicleId: input.vehicleId,
-      department: input.department ?? null,
-      custodian: input.custodian ?? null,
-      driverId: input.driverId ?? null,
-      allocationDate: input.allocationDate,
-      returnDate: input.returnDate ?? null,
-      approvalStatus: input.approvalStatus,
-      authorisationStatus: input.authorisationStatus,
-      notes: input.notes ?? null,
+    const createAllocation = db.transaction(() => {
+      // A vehicle and a driver can each have only one active allocation.
+      if (input.authorisationStatus === "active") {
+        db.prepare(`
+          UPDATE vehicle_allocations
+          SET authorisation_status = 'expired',
+              return_date = COALESCE(return_date, date('now'))
+          WHERE vehicle_id = ? AND authorisation_status = 'active'
+        `).run(input.vehicleId);
+        if (input.driverId) {
+          db.prepare(`
+            UPDATE vehicle_allocations
+            SET authorisation_status = 'expired',
+                return_date = COALESCE(return_date, date('now'))
+            WHERE driver_id = ? AND authorisation_status = 'active'
+          `).run(input.driverId);
+        }
+      }
+
+      db.prepare(`
+        INSERT INTO vehicle_allocations (
+          id, vehicle_id, department, custodian, driver_id, allocation_date, return_date,
+          approval_status, authorisation_status, notes
+        ) VALUES (
+          @id, @vehicleId, @department, @custodian, @driverId, @allocationDate, @returnDate,
+          @approvalStatus, @authorisationStatus, @notes
+        )
+      `).run({
+        id,
+        vehicleId: input.vehicleId,
+        department: input.department ?? null,
+        custodian: input.custodian ?? null,
+        driverId: input.driverId ?? null,
+        allocationDate: input.allocationDate,
+        returnDate: input.returnDate ?? null,
+        approvalStatus: input.approvalStatus,
+        authorisationStatus: input.authorisationStatus,
+        notes: input.notes ?? null,
+      });
     });
+    createAllocation();
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_ALLOCATED", entity: "vehicle_allocations", entityId: id, newValue: input });
     const created = db.prepare("SELECT * FROM vehicle_allocations WHERE id = ?").get(id);

@@ -1,14 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   telemetryApi,
   DeviceFeatures,
   DeviceCommand,
   DeviceMedia,
   IoFeature,
-  ParamMapRow,
 } from "../api/telemetry";
-import { apiGet } from "../api/client";
+import {
+  deviceConfigApi,
+  DeviceConfig,
+  DeviceConfigPreset,
+  DeviceConfigUpdate,
+  DeviceConfigValue,
+} from "../api/deviceConfig";
 import { useAuth } from "../context/AuthContext";
 
 /** Roles allowed to dispatch remote device commands (mirrors the API guard). */
@@ -20,9 +25,18 @@ const IGNITION_CUT_SPEED_LIMIT_KMH = 10;
 const STATUS_STYLES: Record<string, string> = {
   queued: "bg-amber-400/15 text-amber-400",
   sent: "bg-signal-green/15 text-signal-green",
+  applied: "bg-emerald-500/15 text-emerald-400",
   acked: "bg-emerald-500/15 text-emerald-400",
   acknowledged: "bg-emerald-500/15 text-emerald-400",
   failed: "bg-signal-red/15 text-signal-red",
+  expired: "bg-base-600 text-ink-300",
+};
+
+const CONFIG_STATUS_STYLES: Record<string, string> = {
+  pending: "bg-amber-400/15 text-amber-400",
+  applied: "bg-emerald-500/15 text-emerald-400",
+  failed: "bg-signal-red/15 text-signal-red",
+  unknown: "bg-base-600 text-ink-300",
 };
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -65,6 +79,8 @@ function serializedCommand(payloadJson: string): string {
         if (c.timeout !== undefined && c.timeout !== null) parts.push(String(c.timeout));
         return parts.join(" ");
       }
+      case "getparam":
+        return `getparam ${c.param_id}`;
       case "camreq":
         return c.channel !== undefined && c.channel !== null ? `camreq ${c.channel}` : "camreq";
       case "diagnostic":
@@ -78,8 +94,45 @@ function serializedCommand(payloadJson: string): string {
   }
 }
 
+function ConfigPresetCard({
+  preset,
+  category,
+  children,
+  disabled,
+  onApply,
+}: {
+  preset?: DeviceConfigPreset;
+  category?: string;
+  children: ReactNode;
+  disabled: boolean;
+  onApply: () => void;
+}) {
+  if (!preset) return null;
+  return (
+    <div className="panel p-4 space-y-3">
+      <div>
+        {category && (
+          <div className="text-[10px] uppercase tracking-wider text-amber-400/80 font-semibold">{category}</div>
+        )}
+        <div className="text-sm font-semibold text-ink-100">{preset.label}</div>
+        <p className="text-[11px] text-ink-500 mt-0.5">{preset.description}</p>
+      </div>
+      <div className="space-y-2">{children}</div>
+      <div className="flex items-end justify-between gap-3 pt-1">
+        <span className="text-[10px] font-mono text-ink-500">
+          {preset.parameters.map((p) => `${p.param_id ?? "?"} ${p.label}`).join(" · ")}
+        </span>
+        <button onClick={onApply} disabled={disabled} className="btn-primary text-xs px-3 py-1.5">
+          Apply
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function DeviceTelemetry() {
   const { imei } = useParams<{ imei: string }>();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
   const canCommand = !!user && COMMAND_ROLES.has(user.role);
   const isAdmin = user?.role === "admin";
@@ -87,14 +140,17 @@ export default function DeviceTelemetry() {
   const [device, setDevice] = useState<DeviceFeatures | null>(null);
   const [commands, setCommands] = useState<DeviceCommand[]>([]);
   const [media, setMedia] = useState<DeviceMedia[]>([]);
-  const [params, setParams] = useState<ParamMapRow[]>([]);
-  const [paramInputs, setParamInputs] = useState<Record<string, string>>({});
+  const [config, setConfig] = useState<DeviceConfig | null>(null);
+  const [configInputs, setConfigInputs] = useState<Record<string, string>>({});
+  const [rawParam, setRawParam] = useState({ param_id: "", value: "" });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  const [tab, setTab] = useState<TabKey>("fuel");
+  const [tab, setTab] = useState<TabKey>(
+    searchParams.get("tab") === "configuration" ? "parameters" : "fuel"
+  );
   // Pending immobilizer action awaiting explicit confirmation.
   const [confirmDigout, setConfirmDigout] = useState<0 | 1 | null>(null);
   const [confirmChecked, setConfirmChecked] = useState(false);
@@ -104,14 +160,17 @@ export default function DeviceTelemetry() {
   const load = useCallback(async () => {
     if (!imei) return;
     try {
-      const [featuresRes, commandsRes, mediaRes] = await Promise.all([
+      const configPromise = deviceConfigApi.get(imei).catch(() => null);
+      const [featuresRes, commandsRes, mediaRes, configRes] = await Promise.all([
         telemetryApi.features(imei),
         telemetryApi.commands.list(imei),
         telemetryApi.media(imei),
+        configPromise,
       ]);
       setDevice(featuresRes.data);
       setCommands(commandsRes.data);
       setMedia(mediaRes.data);
+      setConfig(configRes?.data ?? null);
       setError(null);
       setLastRefresh(new Date());
     } catch (err: any) {
@@ -128,32 +187,112 @@ export default function DeviceTelemetry() {
   }, [load]);
 
   useEffect(() => {
-    if (!canCommand) return;
-    apiGet<{ data: ParamMapRow[] }>("/settings/param-map")
-      .then((res) => {
-        setParams(res.data);
-        const initial: Record<string, string> = {};
-        for (const p of res.data) initial[p.feature_key] = "";
-        setParamInputs(initial);
-      })
-      .catch(() => setParams([]));
-  }, [canCommand]);
+    if (!config) return;
+    setConfigInputs((prev) => {
+      const next = { ...prev };
+      for (const p of config.parameters) {
+        const value = p.desired_value ?? p.value;
+        if (next[p.feature_key] === undefined && value !== null) next[p.feature_key] = String(value);
+      }
+      return next;
+    });
+  }, [config]);
 
   const fuelEvents = useMemo(
     () => (device?.events ?? []).filter((e) => e.type === "refuel" || e.type === "fuel_drain"),
     [device]
   );
 
-  async function sendSetparam(p: ParamMapRow) {
+  async function applyConfig(body: DeviceConfigUpdate, successMessage?: string) {
     if (!imei) return;
-    const raw = paramInputs[p.feature_key];
-    if (raw === "" || raw === undefined) {
-      setError(`Enter a value for ${p.description || p.feature_key} first.`);
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await deviceConfigApi.update(imei, body);
+      setNotice(successMessage || res.message || "Configuration update queued.");
+      await load();
+    } catch (err: any) {
+      setError(err.message || "Failed to queue configuration update");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setConfigInput(key: string, value: string) {
+    setConfigInputs((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function readConfiguration() {
+    if (!config || config.parameters.length === 0) {
+      setError("No mapped parameters to read for this device.");
+      return;
+    }
+    await applyConfig(
+      { read: config.parameters.map((p) => p.param_id) },
+      "Configuration read requested. Values update after the tracker's next MeshSat sync."
+    );
+  }
+
+  async function readParameter(paramId: number) {
+    await applyConfig({ read: [paramId] }, `Read request queued for parameter ${paramId}.`);
+  }
+
+  async function getDeviceInfo() {
+    await applyConfig({ diagnostic: "getinfo" }, "Device info request queued.");
+  }
+
+  async function applyReportingInterval() {
+    const value = Number(configInputs["reporting_interval"]);
+    if (!Number.isFinite(value) || value < 0) {
+      setError("Enter a valid reporting interval in seconds.");
+      return;
+    }
+    await applyConfig({ preset: "reporting_interval", value });
+  }
+
+  async function applyIgnitionSource() {
+    const value = Number(configInputs["ignition_source"]);
+    if (!Number.isFinite(value)) {
+      setError("Enter a valid ignition source value.");
+      return;
+    }
+    await applyConfig({ preset: "ignition_source", value });
+  }
+
+  async function applyDataAcquisition() {
+    const ignition_on = Number(configInputs["data_acquisition_ignition_on"]);
+    const ignition_off = Number(configInputs["data_acquisition_ignition_off"]);
+    if (!Number.isFinite(ignition_on) || ignition_on < 0 || !Number.isFinite(ignition_off) || ignition_off < 0) {
+      setError("Enter valid ignition-on and ignition-off acquisition periods.");
+      return;
+    }
+    await applyConfig({ preset: "data_acquisition", values: { ignition_on, ignition_off } });
+  }
+
+  async function applyDigitalOutput() {
+    const value = Number(configInputs["digital_output_control"]);
+    if (value !== 0 && value !== 1) {
+      setError("Digital output must be 0 (off) or 1 (on).");
+      return;
+    }
+    await applyConfig({ preset: "digital_output_control", value });
+  }
+
+  async function applyRawParameter() {
+    const paramId = Number(rawParam.param_id);
+    if (!Number.isInteger(paramId) || paramId <= 0) {
+      setError("Enter a positive numeric parameter ID.");
+      return;
+    }
+    const raw = rawParam.value.trim();
+    if (!raw) {
+      setError("Enter a value for the raw parameter.");
       return;
     }
     const numeric = Number(raw);
-    const value = Number.isNaN(numeric) ? raw : numeric;
-    await issue({ imei, type: "setparam", params: { feature_key: p.feature_key, value } });
+    const value: DeviceConfigValue = Number.isNaN(numeric) ? raw : numeric;
+    await applyConfig({ parameters: [{ param_id: paramId, value }] });
   }
 
   async function sendDigout(dout: 0 | 1, reason?: string, force?: boolean) {
@@ -280,13 +419,17 @@ export default function DeviceTelemetry() {
   const doutEngaged = doutFeature?.value === 1;
   const lastSpeed = live?.speed_kmh ?? null;
   const moving = lastSpeed !== null && lastSpeed > IGNITION_CUT_SPEED_LIMIT_KMH;
+  const rawParamId = Number(rawParam.param_id);
+  // FMB125 server/GPRS/APN parameters live in the 2000-2199 block. Changing
+  // them remotely can lock the tracker out of MeshSat, so surface a warning.
+  const serverParamWarning = Number.isInteger(rawParamId) && rawParamId >= 2000 && rawParamId <= 2199;
 
   // Capability-driven tabs: the three core tabs are always present; the camera
   // and CAN/BLE tabs appear only when the device hardware supports them.
   const tabs: { key: TabKey; label: string }[] = [
     { key: "immobilizer", label: "Immobilizer" },
     { key: "fuel", label: "Fuel & Telemetry" },
-    { key: "parameters", label: "Parameters" },
+    { key: "parameters", label: "Configuration" },
   ];
   if (capabilities?.has_camera) tabs.push({ key: "camera", label: "Camera / Media" });
   if (capabilities?.has_can_j1939 || capabilities?.has_ble_sensors) tabs.push({ key: "canble", label: "CAN / BLE" });
@@ -555,41 +698,270 @@ export default function DeviceTelemetry() {
         </>
       )}
 
-      {/* Parameters tab */}
+      {/* Device configuration tab (remote Teltonika Codec 12) */}
       {activeTab === "parameters" && (
-        <div className="panel p-5 space-y-4">
-          <h2 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Device Parameters</h2>
-          {!canCommand ? (
-            <div className="text-xs text-ink-500">Your role is read-only for device commands.</div>
-          ) : params.length === 0 ? (
-            <div className="text-xs text-ink-500">No configurable parameters defined.</div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {params.map((p) => (
-                <div key={p.id} className="p-3 rounded-lg bg-base-950 border border-base-800 space-y-2">
-                  <div>
-                    <div className="text-xs font-semibold text-ink-100">{p.description || p.feature_key}</div>
-                    <div className="text-[10px] text-ink-500 font-mono">param {p.param_id} · {p.feature_key}</div>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={paramInputs[p.feature_key] ?? ""}
-                      onChange={(e) => setParamInputs((prev) => ({ ...prev, [p.feature_key]: e.target.value }))}
-                      placeholder="New value"
-                      className="input text-xs flex-1 bg-base-900 border-base-700 text-ink-100"
-                    />
-                    <button
-                      onClick={() => sendSetparam(p)}
-                      disabled={busy}
-                      className="btn-primary text-xs px-3 py-2 whitespace-nowrap"
-                    >
-                      Set
-                    </button>
-                  </div>
+        <div className="space-y-4">
+          <div className="panel p-5 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+              <div className="space-y-1">
+                <h2 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Device Configuration</h2>
+                <p className="text-xs text-ink-500 max-w-2xl">
+                  Remote Teltonika FMB125 configuration through the MeshSat gateway. Commands use Codec 12 and are
+                  applied on the tracker's next TCP sync. Parameter IDs come from Settings → Teltonika Parameter Map.
+                </p>
+                <div className="text-[10px] text-ink-500 font-mono">
+                  IMEI {imei} · {config?.device_model ?? device?.device_model ?? "FMB125"} · Last applied{" "}
+                  {fmtDate(config?.last_applied_at ?? null)}
                 </div>
-              ))}
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className={`pill ${config?.online ? "bg-emerald-500/15 text-emerald-400" : "bg-signal-red/15 text-signal-red"}`}>
+                    {config?.online ? "Online" : "Offline"}
+                  </span>
+                  <span className="text-ink-400">Last seen {fmtDate(config?.device_last_seen_at ?? null)}</span>
+                  {config?.queued_count ? (
+                    <span className="text-amber-400">{config.queued_count} command(s) queued for next check-in</span>
+                  ) : null}
+                </div>
+                {config?.last_sync_info && (
+                  <div className="text-[10px] text-ink-400 font-mono break-all">
+                    Last device info ({fmtDate(config.last_sync_at)}): {config.last_sync_info}
+                  </div>
+                )}
+              </div>
+              {canCommand ? (
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={readConfiguration} disabled={busy} className="btn-secondary text-xs px-3 py-2">
+                    Read Configuration (getparam)
+                  </button>
+                  <button onClick={getDeviceInfo} disabled={busy} className="btn-secondary text-xs px-3 py-2">
+                    Read Live Status (getinfo)
+                  </button>
+                </div>
+              ) : (
+                <span className="text-xs text-amber-400">Read-only: your role cannot change device configuration.</span>
+              )}
             </div>
+            {config?.last_applied_at && (
+              <div className="text-[11px] text-emerald-400">
+                Last confirmed tracker configuration: {fmtDate(config.last_applied_at)}
+              </div>
+            )}
+          </div>
+
+          {!config ? (
+            <div className="panel p-5 text-xs text-ink-500">Configuration state is unavailable for this device.</div>
+          ) : (
+            <>
+              <div className="panel p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Current / Last-Applied Parameters</h3>
+                  <span className="text-[10px] text-ink-500">Status updates when the tracker acknowledges.</span>
+                </div>
+                {config.parameters.length === 0 ? (
+                  <div className="text-xs text-ink-500">
+                    No parameters are mapped. Add them in Settings → Teltonika Parameter Map.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="table-shell">
+                      <thead>
+                        <tr>
+                          <th>Parameter</th>
+                          <th>Param ID</th>
+                          <th>Desired / Applied</th>
+                          <th>Status</th>
+                          <th>Requested</th>
+                          <th>Applied</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {config.parameters.map((p) => (
+                          <tr key={`${p.param_id}-${p.feature_key}`}>
+                            <td>
+                              <div className="text-xs text-ink-100">{p.description || p.feature_key}</div>
+                              <div className="text-[10px] text-ink-500 font-mono">
+                                {p.feature_key}
+                                {p.unit ? ` · ${p.unit}` : ""}
+                                {p.preset_key ? ` · preset: ${p.preset_key}` : ""}
+                              </div>
+                            </td>
+                            <td className="font-mono text-xs text-ink-300">{p.param_id}</td>
+                            <td className="font-mono text-xs text-ink-100">
+                              {p.desired_value ?? p.value ?? "—"}
+                              <span className="text-ink-500"> / </span>
+                              {p.applied_value ?? "—"}
+                            </td>
+                            <td>
+                              <span className={`pill ${CONFIG_STATUS_STYLES[p.status] || CONFIG_STATUS_STYLES.unknown}`}>
+                                {p.status}
+                              </span>
+                            </td>
+                            <td className="text-[11px] text-ink-400 whitespace-nowrap">{fmtDate(p.requested_at)}</td>
+                            <td className="text-[11px] text-ink-400 whitespace-nowrap">{fmtDate(p.applied_at)}</td>
+                            <td className="whitespace-nowrap">
+                              {canCommand && (
+                                <button
+                                  onClick={() => readParameter(p.param_id)}
+                                  disabled={busy}
+                                  className="text-xs text-amber-400 hover:underline"
+                                >
+                                  Read
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {canCommand && (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <ConfigPresetCard
+                      preset={config.presets.find((p) => p.key === "reporting_interval")}
+                      category="Data Acquisition & Reporting"
+                      disabled={busy}
+                      onApply={applyReportingInterval}
+                    >
+                      <label className="label">Interval (seconds)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={configInputs["reporting_interval"] ?? ""}
+                        onChange={(e) => setConfigInput("reporting_interval", e.target.value)}
+                        placeholder="e.g. 30"
+                        className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                      />
+                    </ConfigPresetCard>
+
+                    <ConfigPresetCard
+                      preset={config.presets.find((p) => p.key === "ignition_source")}
+                      category="Ignition & Power Monitoring"
+                      disabled={busy}
+                      onApply={applyIgnitionSource}
+                    >
+                      <label className="label">Source value</label>
+                      <input
+                        type="number"
+                        value={configInputs["ignition_source"] ?? ""}
+                        onChange={(e) => setConfigInput("ignition_source", e.target.value)}
+                        placeholder="FMB125 ignition source"
+                        className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                      />
+                      <p className="text-[10px] text-ink-500">
+                        Use the value matching the vehicle wiring (verify in the FMB125 parameter map).
+                      </p>
+                    </ConfigPresetCard>
+
+                    <ConfigPresetCard
+                      preset={config.presets.find((p) => p.key === "data_acquisition")}
+                      category="Data Acquisition & Reporting"
+                      disabled={busy}
+                      onApply={applyDataAcquisition}
+                    >
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="label">Ignition ON (s)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={configInputs["data_acquisition_ignition_on"] ?? ""}
+                            onChange={(e) => setConfigInput("data_acquisition_ignition_on", e.target.value)}
+                            placeholder="e.g. 10"
+                            className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="label">Ignition OFF (s)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={configInputs["data_acquisition_ignition_off"] ?? ""}
+                            onChange={(e) => setConfigInput("data_acquisition_ignition_off", e.target.value)}
+                            placeholder="e.g. 60"
+                            className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                          />
+                        </div>
+                      </div>
+                    </ConfigPresetCard>
+
+                    <ConfigPresetCard
+                      preset={config.presets.find((p) => p.key === "digital_output_control")}
+                      category="Digital I/O & Immobilizer Control"
+                      disabled={busy}
+                      onApply={applyDigitalOutput}
+                    >
+                      <label className="label">DOUT1 state</label>
+                      <select
+                        value={configInputs["digital_output_control"] ?? "0"}
+                        onChange={(e) => setConfigInput("digital_output_control", e.target.value)}
+                        className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                      >
+                        <option value="0">0 — OFF</option>
+                        <option value="1">1 — ON</option>
+                      </select>
+                    </ConfigPresetCard>
+                  </div>
+
+                  <div className="panel p-5 space-y-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">
+                          4) Advanced Parameter Editor
+                        </h3>
+                        <span className="text-[10px] uppercase tracking-wider text-amber-400/80 font-semibold">
+                          Server/GPRS/APN writes are flagged
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-ink-500 mt-1">
+                        Write any Teltonika parameter by numeric ID. Use this for firmware-specific settings not
+                        covered by a preset.
+                      </p>
+                      {serverParamWarning && (
+                        <div className="mt-2 p-2 rounded border border-amber-400/40 bg-amber-400/10 text-[11px] text-amber-300">
+                          Warning: parameter IDs 2000–2199 are server/GPRS/APN settings. An incorrect value can
+                          disconnect the tracker from MeshSat and require physical access to recover.
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+                      <div className="sm:w-40">
+                        <label className="label">Param ID</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={rawParam.param_id}
+                          onChange={(e) => setRawParam((prev) => ({ ...prev, param_id: e.target.value }))}
+                          placeholder="e.g. 1580"
+                          className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="label">Value</label>
+                        <input
+                          type="text"
+                          value={rawParam.value}
+                          onChange={(e) => setRawParam((prev) => ({ ...prev, value: e.target.value }))}
+                          placeholder="Value to set"
+                          className="input text-xs w-full bg-base-900 border-base-700 text-ink-100"
+                        />
+                      </div>
+                      <button
+                        onClick={applyRawParameter}
+                        disabled={busy}
+                        className="btn-primary text-xs px-4 py-2 whitespace-nowrap"
+                      >
+                        Set Parameter
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
           )}
         </div>
       )}
@@ -645,53 +1017,56 @@ export default function DeviceTelemetry() {
       )}
 
       {/* Command history — applies to every command type */}
-      {canCommand && (
-        <div className="panel overflow-hidden">
-          <div className="px-5 py-3 border-b border-base-700 text-sm font-semibold text-ink-100">Command History</div>
-          <div className="overflow-x-auto">
-            <table className="table-shell">
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Type</th>
-                  <th>Command</th>
-                  <th>Status</th>
-                  <th>Response</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {commands.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="text-center text-ink-500 py-8">No commands issued for this device.</td>
-                  </tr>
-                ) : (
-                  commands.map((c) => (
-                    <tr key={c.id}>
-                      <td className="text-xs text-ink-400 whitespace-nowrap">{fmtDate(c.created_at)}</td>
-                      <td className="text-xs capitalize text-ink-200">{c.command_type}</td>
-                      <td className="text-[11px] font-mono text-amber-400 max-w-xs truncate" title={c.payload_json}>
-                        {serializedCommand(c.payload_json)}
-                      </td>
-                      <td>
-                        <span className={`pill ${STATUS_STYLES[c.status] || "bg-base-600 text-ink-300"} capitalize`}>{c.status}</span>
-                      </td>
-                      <td className="text-xs text-ink-400 max-w-xs truncate">{c.response_text || "—"}</td>
-                      <td>
-                        {c.status === "queued" && (
-                          <button onClick={() => cancel(c.id)} disabled={busy} className="text-xs text-signal-red hover:underline">
-                            Cancel
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+      <div className="panel overflow-hidden">
+        <div className="px-5 py-3 border-b border-base-700 flex items-center justify-between gap-3">
+          <span className="text-sm font-semibold text-ink-100">Command History &amp; Queue</span>
+          <span className="text-[10px] text-ink-500">
+            {config?.queued_count ? `${config.queued_count} queued for check-in` : "No queued commands"}
+          </span>
         </div>
-      )}
+        <div className="overflow-x-auto">
+          <table className="table-shell">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Type</th>
+                <th>Command</th>
+                <th>Status</th>
+                <th>Response</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {commands.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="text-center text-ink-500 py-8">No commands issued for this device.</td>
+                </tr>
+              ) : (
+                commands.map((c) => (
+                  <tr key={c.id}>
+                    <td className="text-xs text-ink-400 whitespace-nowrap">{fmtDate(c.created_at)}</td>
+                    <td className="text-xs capitalize text-ink-200">{c.command_type}</td>
+                    <td className="text-[11px] font-mono text-amber-400 max-w-xs truncate" title={c.payload_json}>
+                      {c.raw_command || serializedCommand(c.payload_json)}
+                    </td>
+                    <td>
+                      <span className={`pill ${STATUS_STYLES[c.status] || "bg-base-600 text-ink-300"} capitalize`}>{c.status}</span>
+                    </td>
+                    <td className="text-xs text-ink-400 max-w-xs truncate">{c.response_payload || c.response_text || "—"}</td>
+                    <td>
+                      {c.status === "queued" && canCommand && (
+                        <button onClick={() => cancel(c.id)} disabled={busy} className="text-xs text-signal-red hover:underline">
+                          Cancel
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       {/* Immobilizer confirmation — required before any ignition cut/restore */}
       {confirmDigout !== null && (

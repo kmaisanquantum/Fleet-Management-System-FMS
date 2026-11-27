@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db";
 import { requireAuth } from "../middleware/auth";
+import { DRIVER_ACTIVE_VEHICLE_JOIN } from "../services/vehicleAssignments";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,11 +16,11 @@ router.get("/", (req, res, next) => {
     let query = `
       SELECT
         d.*,
-        v.vehicle_number as assigned_vehicle_number,
-        v.registration_number as assigned_vehicle_reg
+        va_active.vehicle_id as assigned_vehicle_id,
+        v_active.vehicle_number as assigned_vehicle_number,
+        v_active.registration_number as assigned_vehicle_reg
       FROM drivers d
-      LEFT JOIN vehicle_allocations va ON va.driver_id = d.id AND va.authorisation_status = 'active'
-      LEFT JOIN vehicles v ON v.id = va.vehicle_id
+      ${DRIVER_ACTIVE_VEHICLE_JOIN}
       WHERE 1=1
     `;
     const params: any[] = [];
@@ -84,6 +85,9 @@ router.get("/", (req, res, next) => {
         licenceClass: driver.licence_class,
         licenceExpiry: driver.licence_expiry,
         authorisationStatus: driver.authorisation_status,
+        assignedVehicleId: driver.assigned_vehicle_id ?? null,
+        assignedVehicleNumber: driver.assigned_vehicle_number ?? null,
+        assignedVehicleRegistration: driver.assigned_vehicle_reg ?? null,
         assignedVehicle: driver.assigned_vehicle_number ? `${driver.assigned_vehicle_number} (${driver.assigned_vehicle_reg})` : "Unassigned",
         metrics: {
           safetyScore,

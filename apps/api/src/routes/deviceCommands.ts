@@ -1,39 +1,51 @@
 import { Router } from "express";
 import { z } from "zod";
-import { v4 as uuid } from "uuid";
 import { db } from "../db";
 import { requireAuth, requireIngestToken } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
+import { applyConfigAck, parseTrackerReply, ConfigValue } from "../services/deviceConfig";
+import {
+  buildCommand,
+  COMMAND_ROLES,
+  commandAuditAction,
+  dispatchDeviceCommand,
+  IGNITION_CUT_SPEED_LIMIT_KMH,
+  latestSpeedKmh,
+  normalizeCommandStatus,
+  serializeCommand,
+} from "../services/deviceCommands";
 
 /**
  * Remote device configuration / control (Teltonika Codec 12).
  *
- * Commands are queued locally, then handed to the MeshSat VPS command endpoint
- * (meshsat.dspng.space `/api/cmd`), which queues them and delivers them to the
- * tracker over its next TCP session (5027). Delivery is therefore asynchronous:
- * a command shows as "Queued / Pending Next Tracker Sync" until the tracker's
- * next sync.
+ * Commands are queued locally, then handed to the MeshSat Teltonika bridge
+ * (`POST ${MESHSAT_BRIDGE_URL}/api/devices/:imei/command`), which delivers
+ * them to the tracker over its next TCP session (5027). Delivery is therefore
+ * asynchronous: a command shows as queued/sent until the tracker's reply
+ * arrives on the ack callback.
  */
 const router = Router();
+
+export { buildCommand, COMMAND_ROLES, IGNITION_CUT_SPEED_LIMIT_KMH, serializeCommand } from "../services/deviceCommands";
+export { forwardCommand } from "../services/deviceCommands";
+
+/** Body contract for the tracker-ack callback (POST /ack). */
+const ackSchema = z.object({
+  imei: z.string().min(1),
+  command: z.string().min(1).optional(),
+  cmd: z.string().min(1).optional(),
+  response: z.string().optional(),
+  reply: z.string().optional(),
+});
 
 /**
  * POST /api/telemetry/commands/ack
  *
- * Tracker-reply callback. The MeshSat VPS calls this when the FMB125 answers a
- * queued command over Codec 12, authenticated with the same
+ * Tracker-reply callback. The MeshSat bridge calls this when the FMB125
+ * answers a queued command over Codec 12, authenticated with the same
  * `Authorization: Bearer ${TELEMETRY_INGEST_TOKEN}` used by `/ingest`.
- *
- * Body: `{ imei, command | cmd, response | reply }`, where `command`/`cmd` is
- * the Teltonika command string the tracker acknowledged (e.g. `setparam 1580:80`)
- * and `response`/`reply` is the tracker's raw reply text.
- *
- * The most recent `device_commands` row for that imei with status `sent` whose
- * serialized command matches is marked `acknowledged` (storing `response_text`
- * and `acked_at`). Returns 200 with the updated row, or 404 when no sent
- * command matches. Registered before `requireAuth` — this path uses the ingest
- * bearer token, not a user JWT.
  */
 router.post("/ack", requireIngestToken, (req, res, next) => {
   try {
@@ -46,10 +58,11 @@ router.post("/ack", requireIngestToken, (req, res, next) => {
     const reply = parsed.data.response ?? parsed.data.reply ?? null;
 
     const rows = db
-      .prepare("SELECT id, payload_json FROM device_commands WHERE imei = ? AND status = 'sent' ORDER BY created_at DESC")
-      .all(imei) as { id: string; payload_json: string | null }[];
+      .prepare("SELECT id, payload_json, raw_command FROM device_commands WHERE imei = ? AND status IN ('sent', 'queued') ORDER BY created_at DESC")
+      .all(imei) as { id: string; payload_json: string | null; raw_command: string | null }[];
 
     const match = rows.find((row) => {
+      if (row.raw_command && row.raw_command.trim() === command) return true;
       if (!row.payload_json) return false;
       try {
         return serializeCommand(JSON.parse(row.payload_json)).trim() === command;
@@ -60,12 +73,20 @@ router.post("/ack", requireIngestToken, (req, res, next) => {
     if (!match) return res.status(404).json({ error: "No matching sent command", imei, command });
 
     const ackedAt = new Date().toISOString().replace("T", " ").substring(0, 19);
-    db.prepare("UPDATE device_commands SET status = 'acknowledged', response_text = ?, acked_at = ? WHERE id = ?")
-      .run(reply, ackedAt, match.id);
+    const trackerReply = parseTrackerReply(reply);
+    const status = trackerReply.status === "failed" ? "failed" : "applied";
+    db.prepare(`
+      UPDATE device_commands
+      SET status = ?, response_text = ?, response_payload = ?, acked_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(status, reply, reply, ackedAt, ackedAt, match.id);
+
+    const commandRow = db.prepare("SELECT * FROM device_commands WHERE id = ?").get(match.id) as any;
+    applyConfigAck(commandRow, reply);
 
     res.json({
-      data: db.prepare("SELECT * FROM device_commands WHERE id = ?").get(match.id),
-      message: "Command acknowledged",
+      data: { ...commandRow, status: normalizeCommandStatus(commandRow.status) },
+      message: trackerReply.status === "failed" ? "Command failed" : "Command acknowledged",
     });
   } catch (e) {
     next(e);
@@ -73,22 +94,6 @@ router.post("/ack", requireIngestToken, (req, res, next) => {
 });
 
 router.use(requireAuth);
-
-/** Roles permitted to dispatch device commands (client-role users are excluded). */
-const COMMAND_ROLES = ["admin", "fleet_manager"];
-
-/**
- * Read-only status commands the FMB125 accepts. Only these exact strings may be
- * issued through the `diagnostic` type; arbitrary strings must go through `raw`.
- */
-const DIAGNOSTIC_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus", "readio"]);
-
-/**
- * Speed above which an ignition cut (setdigout 1) is refused: immobilising a
- * moving vehicle is unsafe. Overridable only by an `admin` that explicitly
- * passes `force: true` (which is audited as IGNITION_CUT_FORCED).
- */
-export const IGNITION_CUT_SPEED_LIMIT_KMH = 10;
 
 const commandSchema = z.object({
   imei: z.string().min(1),
@@ -99,157 +104,6 @@ const commandSchema = z.object({
   /** Operator-supplied justification; required for an ignition cut. */
   reason: z.string().optional(),
 });
-
-/** Body contract for the tracker-ack callback (POST /ack). */
-const ackSchema = z.object({
-  imei: z.string().min(1),
-  command: z.string().min(1).optional(),
-  cmd: z.string().min(1).optional(),
-  response: z.string().optional(),
-  reply: z.string().optional(),
-});
-
-export interface BuiltCommand {
-  command?: Record<string, unknown>;
-  error?: string;
-}
-
-/**
- * Builds the concrete Codec-12 command from a validated request. `setparam`
- * requires a parameter resolvable through `param_map` (by `param_id` or
- * `feature_key`); `setdigout` requires a 0/1 DOUT state (with an optional
- * `dout_index`, defaulting to DOUT 1, and an optional non-negative `timeout`);
- * `diagnostic` requires a whitelisted status command; `camreq` requests a
- * camera snapshot (optional positive `channel`).
- */
-export function buildCommand(
-  type: "setparam" | "setdigout" | "diagnostic" | "raw" | "camreq",
-  params: Record<string, string | number | boolean>
-): BuiltCommand {
-  if (type === "setparam") {
-    let paramId = typeof params.param_id === "number" ? params.param_id : undefined;
-    if (paramId === undefined && typeof params.feature_key === "string") {
-      const row = db.prepare("SELECT param_id FROM param_map WHERE feature_key = ? LIMIT 1").get(params.feature_key) as { param_id: number } | undefined;
-      paramId = row?.param_id;
-    }
-    if (paramId === undefined) return { error: "Unknown parameter: supply a mapped param_id or feature_key" };
-    if (params.value === undefined) return { error: "setparam requires a 'value'" };
-    return { command: { type: "setparam", param_id: paramId, value: params.value } };
-  }
-
-  if (type === "setdigout") {
-    const raw = params.dout ?? params.dout1 ?? params.state;
-    if (raw === undefined) return { error: "setdigout requires 'dout' (0 or 1)" };
-    const dout = Number(raw);
-    if (dout !== 0 && dout !== 1) return { error: "setdigout 'dout' must be 0 or 1" };
-    const command: Record<string, unknown> = { type: "setdigout", dout };
-    // Optionally target a specific DOUT relay (defaults to DOUT 1).
-    const rawIndex = params.dout_index ?? params.index;
-    if (rawIndex !== undefined && rawIndex !== null && rawIndex !== "") {
-      const doutIndex = Number(rawIndex);
-      if (!Number.isInteger(doutIndex) || doutIndex < 1) return { error: "setdigout 'dout_index' must be a positive integer" };
-      command.dout_index = doutIndex;
-    }
-    // Optional DOUT pulse timeout (milliseconds).
-    if (params.timeout !== undefined && params.timeout !== null && params.timeout !== "") {
-      const timeout = Number(params.timeout);
-      if (!Number.isInteger(timeout) || timeout < 0) return { error: "setdigout 'timeout' must be a non-negative integer" };
-      command.timeout = timeout;
-    }
-    return { command };
-  }
-
-  if (type === "diagnostic") {
-    const cmd = params.command;
-    if (typeof cmd !== "string" || !DIAGNOSTIC_COMMANDS.has(cmd)) {
-      return { error: `diagnostic requires a 'command' of: ${[...DIAGNOSTIC_COMMANDS].join(", ")}` };
-    }
-    return { command: { type: "diagnostic", command: cmd } };
-  }
-
-  if (type === "camreq") {
-    const command: Record<string, unknown> = { type: "camreq" };
-    const rawChannel = params.channel ?? params.camera_channel;
-    if (rawChannel !== undefined && rawChannel !== null && rawChannel !== "") {
-      const channel = Number(rawChannel);
-      if (!Number.isInteger(channel) || channel < 1) return { error: "camreq 'channel' must be a positive integer" };
-      command.channel = channel;
-    }
-    return { command };
-  }
-
-  if (typeof params.command !== "string" || !params.command) return { error: "raw requires a 'command' string" };
-  return { command: { type: "raw", command: params.command } };
-}
-
-/**
- * Serializes a built command into the Teltonika command string the VPS
- * forwards over Codec 12 (e.g. `setparam 1580:80`, `setdigout 1 1`,
- * `setdigout 1 1 30000`, `getgps`, `camreq 1`).
- *
- * `setdigout` is emitted in the full `setdigout <state> <index> [timeout]`
- * form; the DOUT index defaults to 1 when not supplied.
- */
-export function serializeCommand(command: Record<string, unknown>): string {
-  switch (command.type) {
-    case "setparam":
-      return `setparam ${command.param_id}:${command.value}`;
-    case "setdigout": {
-      const index = command.dout_index ?? 1;
-      const parts = ["setdigout", String(command.dout), String(index)];
-      if (command.timeout !== undefined && command.timeout !== null) parts.push(String(command.timeout));
-      return parts.join(" ");
-    }
-    case "camreq":
-      return command.channel !== undefined && command.channel !== null ? `camreq ${command.channel}` : "camreq";
-    case "diagnostic":
-    case "raw":
-      return String(command.command);
-    default:
-      return JSON.stringify(command);
-  }
-}
-
-/**
- * Most recent reported speed (km/h) for a vehicle, from the rich
- * `telemetry_records` table when available and otherwise the legacy
- * `gps_positions` table. `null` when the vehicle has never reported a fix.
- */
-export function latestSpeedKmh(vehicleId: string): number | null {
-  const t = db
-    .prepare("SELECT speed_kmh FROM telemetry_records WHERE vehicle_id = ? AND speed_kmh IS NOT NULL ORDER BY recorded_at DESC LIMIT 1")
-    .get(vehicleId) as { speed_kmh: number } | undefined;
-  if (t?.speed_kmh !== undefined && t?.speed_kmh !== null) return Number(t.speed_kmh);
-
-  const p = db
-    .prepare("SELECT speed FROM gps_positions WHERE vehicle_id = ? ORDER BY recorded_at DESC LIMIT 1")
-    .get(vehicleId) as { speed: number } | undefined;
-  return p?.speed !== undefined && p?.speed !== null ? Number(p.speed) : null;
-}
-
-/**
- * Hands a command to the MeshSat VPS command endpoint
- * (`POST ${MESHSAT_CMD_URL}/api/cmd`), authenticated with
- * `Authorization: Bearer ${MESHSAT_CMD_TOKEN}`. Both env vars are read at call
- * time so they can be configured (Coolify) without a rebuild.
- *
- * Payload contract: `{ "imei": "<15-digit>", "command": "<teltonika-cmd>" }`.
- * The VPS also accepts `cmd` as a fallback key — we always send `command`.
- */
-export async function forwardCommand(imei: string, command: string) {
-  const baseUrl = (process.env.MESHSAT_CMD_URL || "https://meshsat.dspng.space").replace(/\/$/, "");
-  const token = process.env.MESHSAT_CMD_TOKEN || "";
-  const res = await fetch(`${baseUrl}/api/cmd`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ imei, command }),
-  });
-  const text = await res.text().catch(() => "");
-  return { ok: res.ok, status: res.status, text };
-}
 
 /**
  * POST /api/telemetry/commands
@@ -297,67 +151,49 @@ router.post("/", requireRole(...COMMAND_ROLES), async (req, res, next) => {
       }
     }
 
-    const id = uuid();
-    db.prepare(`
-      INSERT INTO device_commands (id, imei, vehicle_id, command_type, payload_json, status, requested_by, reason)
-      VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
-    `).run(id, imei, device.vehicle_id, type, JSON.stringify(built.command), req.user!.id, reason);
+    const configState = type === "setparam"
+      ? {
+          paramId: Number(built.command.param_id),
+          featureKey: typeof params.feature_key === "string" ? params.feature_key : null,
+          value: built.command.value as ConfigValue,
+          pendingStatus: "pending" as const,
+        }
+      : type === "diagnostic" && built.command.type === "getparam"
+        ? { paramId: Number(built.command.param_id), pendingStatus: "pending" as const }
+        : undefined;
 
-    const serialized = serializeCommand(built.command);
-
-    // Immobilizer events get a distinct audit action so ignition cut/restore is
-    // auditable on its own; every other command keeps DEVICE_COMMAND_QUEUED.
-    const auditAction = type === "setdigout"
-      ? (built.command.dout === 1 ? "IGNITION_CUT_QUEUED" : "IGNITION_RESTORE_QUEUED")
-      : "DEVICE_COMMAND_QUEUED";
+    const result = await dispatchDeviceCommand({
+      imei,
+      vehicleId: device.vehicle_id,
+      commandType: type,
+      payload: built.command,
+      requestedBy: req.user!.id,
+      reason,
+      configState,
+    });
 
     writeAudit({
       userId: req.user!.id,
-      action: auditAction,
+      action: commandAuditAction(type, built.command),
       entity: "device_commands",
-      entityId: id,
-      newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, type, params, reason },
+      entityId: result.id,
+      newValue: { imei, vehicle_id: device.vehicle_id, command: result.serialized, type, params, reason },
     });
 
-    // A forced override of the moving-vehicle guard is logged distinctly so the
-    // override (and the speed/reason behind it) is auditable on its own.
     if (forcedOverride) {
       writeAudit({
         userId: req.user!.id,
         action: "IGNITION_CUT_FORCED",
         entity: "device_commands",
-        entityId: id,
-        newValue: { imei, vehicle_id: device.vehicle_id, command: serialized, speed_kmh: cutSpeedKmh, reason, forced: true },
+        entityId: result.id,
+        newValue: { imei, vehicle_id: device.vehicle_id, command: result.serialized, speed_kmh: cutSpeedKmh, reason, forced: true },
       });
     }
 
-    // Forward to the MeshSat VPS command endpoint. A 2xx means the command was
-    // accepted for delivery ('sent'); any rejection or transport failure is
-    // terminal ('failed') and the error is recorded for the operator.
-    let status = "queued";
-    let sentAt: string | null = null;
-    let responseText: string | null = null;
-    try {
-      const result = await forwardCommand(imei, serialized);
-      responseText = (result.text || "").slice(0, 1000) || null;
-      if (result.ok) {
-        status = "sent";
-        sentAt = new Date().toISOString().replace("T", " ").substring(0, 19);
-      } else {
-        status = "failed";
-        responseText = responseText || `Command endpoint returned HTTP ${result.status}`;
-      }
-    } catch (err: any) {
-      responseText = `Command endpoint unreachable: ${err?.message ?? String(err)}`;
-      status = "failed";
-    }
-
-    db.prepare("UPDATE device_commands SET status = ?, sent_at = ?, response_text = ? WHERE id = ?").run(status, sentAt, responseText, id);
-
-    res.status(201).json({
-      data: db.prepare("SELECT * FROM device_commands WHERE id = ?").get(id),
-      message: "Queued / Pending Next Tracker Sync",
-    });
+    const message = result.queued
+      ? "Queued — device offline; will dispatch on next check-in"
+      : "Queued / Pending Next Tracker Sync";
+    res.status(201).json({ data: { ...result.row, status: normalizeCommandStatus(result.status) }, message });
   } catch (e) {
     next(e);
   }
@@ -387,7 +223,16 @@ router.get("/", (req, res, next) => {
       params.push(...scope);
     }
     sql += " ORDER BY dc.created_at DESC LIMIT 200";
-    res.json({ data: db.prepare(sql).all(...params) });
+    const rows = db.prepare(sql).all(...params) as any[];
+    res.json({
+      data: rows.map((row) => ({
+        ...row,
+        status: normalizeCommandStatus(row.status),
+        raw_command: row.raw_command ?? (row.payload_json ? serializeCommand(JSON.parse(row.payload_json)) : null),
+        response_payload: row.response_payload ?? row.response_text ?? null,
+        created_by: row.created_by ?? row.requested_by ?? null,
+      })),
+    });
   } catch (e) {
     next(e);
   }
@@ -411,9 +256,14 @@ router.post("/:id/cancel", requireRole(...COMMAND_ROLES), (req, res, next) => {
       return res.status(409).json({ error: "Only queued commands can be cancelled", status: row.status });
     }
 
-    db.prepare("UPDATE device_commands SET status = 'failed', response_text = 'Cancelled by user before dispatch' WHERE id = ?").run(req.params.id);
+    const text = "Cancelled by user before dispatch";
+    db.prepare("UPDATE device_commands SET status = 'failed', response_text = ?, response_payload = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(text, text, req.params.id);
     writeAudit({ userId: req.user!.id, action: "DEVICE_COMMAND_CANCELLED", entity: "device_commands", entityId: req.params.id, previousValue: row });
-    res.json({ data: db.prepare("SELECT * FROM device_commands WHERE id = ?").get(req.params.id), message: "Command cancelled" });
+    res.json({
+      data: { ...(db.prepare("SELECT * FROM device_commands WHERE id = ?").get(req.params.id) as any), status: "failed" },
+      message: "Command cancelled",
+    });
   } catch (e) {
     next(e);
   }

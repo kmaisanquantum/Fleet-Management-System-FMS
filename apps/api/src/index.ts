@@ -37,6 +37,7 @@ import exceptionsRoutes from "./routes/exceptions";
 import driverIntelligenceRoutes from "./routes/driverIntelligence";
 import utilisationRoutes from "./routes/utilisation";
 import settingsRoutes from "./routes/settings";
+import deviceConfigRoutes from "./routes/deviceConfig";
 
 initSchema();
 ensureBootstrapAccounts();
@@ -87,6 +88,10 @@ app.use("/api/v1/fleet", utilisationRoutes);
 app.use("/api/v1/exceptions", exceptionsRoutes);
 app.use("/api/v1/driver-intelligence", driverIntelligenceRoutes);
 app.use("/api/v1/settings", settingsRoutes);
+// Remote FMB125 configuration. `/api/devices` is the documented path; the
+// `/api/v1/devices` alias lets the SPA reuse its normal token-refresh client.
+app.use("/api/devices", deviceConfigRoutes);
+app.use("/api/v1/devices", deviceConfigRoutes);
 
 const webDir = process.env.WEB_DIR || path.join(__dirname, "public");
 if (fs.existsSync(webDir)) {

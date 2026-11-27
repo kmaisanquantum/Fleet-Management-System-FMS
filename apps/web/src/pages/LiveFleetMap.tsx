@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getToken, isTokenExpiring, refreshAccessToken, subscribeToken } from "../api/client";
 
 /**
@@ -43,7 +43,9 @@ async function rollMapSession(token: string): Promise<void> {
 export default function LiveFleetMap() {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [missingAuth, setMissingAuth] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
   const iframeLoadedRef = useRef(false);
+  const reloadInFlightRef = useRef(false);
 
   useEffect(() => {
     if (OVERRIDE_MAP_URL) {
@@ -99,6 +101,49 @@ export default function LiveFleetMap() {
     return () => window.clearInterval(id);
   }, []);
 
+  const reloadMap = useCallback(async () => {
+    if (OVERRIDE_MAP_URL || reloadInFlightRef.current) return;
+    reloadInFlightRef.current = true;
+    try {
+      let token = getToken();
+      if (isTokenExpiring(token)) token = await refreshAccessToken();
+      if (!token) {
+        setMissingAuth(true);
+        setMapUrl(null);
+        return;
+      }
+      setMissingAuth(false);
+      await rollMapSession(token);
+      iframeLoadedRef.current = true;
+      setMapError(null);
+      // The cache-buster forces a fresh iframe navigation while keeping the
+      // fresh token in the proxy URL.
+      setMapUrl(`${PROXY_MAP_PATH}?fms_token=${encodeURIComponent(token)}&retry=${Date.now()}`);
+    } finally {
+      reloadInFlightRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (OVERRIDE_MAP_URL) return;
+
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      const type = event.data?.type;
+      if (type === "fms-map-auth-error") {
+        setMapError("The live map session expired. Reconnecting…");
+        void reloadMap();
+      } else if (type === "fms-map-tile-error") {
+        setMapError("Some map tiles could not be loaded. Check your connection and retry.");
+      } else if (type === "fms-map-ready") {
+        setMapError(null);
+      }
+    }
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [reloadMap]);
+
   return (
     <div className="space-y-4">
       {/* Page Title */}
@@ -111,6 +156,15 @@ export default function LiveFleetMap() {
           Sign in to load the live map — the map is proxied through the FMS and requires an
           authenticated session.
         </p>
+      )}
+
+      {mapError && (
+        <div className="flex items-center justify-between gap-3 p-3 rounded-lg border border-amber-400/40 bg-amber-400/10 text-amber-300 text-xs">
+          <span>{mapError}</span>
+          <button onClick={() => void reloadMap()} className="btn-secondary text-xs px-3 py-1.5 whitespace-nowrap">
+            Retry
+          </button>
+        </div>
       )}
 
       {/* MeshSat map (embedded via the FMS proxy) */}
