@@ -6,7 +6,7 @@ export default function VehicleDetail() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"profile" | "operational" | "fuel" | "maintenance" | "driver" | "exceptions">("profile");
+  const [activeTab, setActiveTab] = useState<"profile" | "operational" | "device" | "fuel" | "maintenance" | "driver" | "exceptions">("profile");
 
   useEffect(() => {
     if (id) loadVehicleIntelligence();
@@ -55,7 +55,7 @@ export default function VehicleDetail() {
 
       {/* Tabs Bar */}
       <div className="flex border-b border-base-700 gap-6 text-sm overflow-x-auto">
-        {(["profile", "operational", "fuel", "maintenance", "driver", "exceptions"] as const).map((tab) => (
+        {(["profile", "operational", "device", "fuel", "maintenance", "driver", "exceptions"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -123,6 +123,33 @@ export default function VehicleDetail() {
               <div><strong className="text-ink-400">Distance Travelled:</strong> <span className="text-sm font-bold text-amber-400">{operational.tripSummary?.total_distance_km || 0} km</span></div>
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === "device" && (
+        <div className="bg-base-900 border border-base-700 rounded-xl p-5 space-y-4">
+          <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Device Settings (Remote Config)</h3>
+          {profile.device_identifier ? (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div><strong className="text-ink-400">IMEI:</strong> <span className="font-mono text-emerald-400">{profile.device_identifier}</span></div>
+                <div><strong className="text-ink-400">Device Model:</strong> <span className="text-ink-200">{profile.device_model || "FMB125"}</span></div>
+                <div><strong className="text-ink-400">Last GPS Fix:</strong> <span className="text-ink-200">{profile.last_gps_fix_at || "N/A"}</span></div>
+              </div>
+              <p className="text-xs text-ink-500">
+                Open the device workspace to read live status, edit acquisition/ignition/IO parameters, and review the
+                command queue.
+              </p>
+              <Link
+                to={`/telemetry/device/${encodeURIComponent(profile.device_identifier)}?tab=configuration`}
+                className="btn-primary inline-flex text-xs px-4 py-2"
+              >
+                Open Device Configuration →
+              </Link>
+            </>
+          ) : (
+            <p className="text-xs text-ink-500">No Teltonika device is linked to this vehicle. Add a GPS device with a 15-digit IMEI first.</p>
+          )}
         </div>
       )}
 

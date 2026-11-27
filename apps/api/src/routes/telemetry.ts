@@ -5,6 +5,10 @@ import { db } from "../db";
 import { requireAuth, requireIngestToken } from "../middleware/auth";
 import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
+import { isDeviceOnline, offlineWindowMinutes } from "../utils/deviceStatus";
+import { flushQueuedCommandsForImei } from "../services/deviceCommands";
+
+export { isDeviceOnline, offlineWindowMinutes };
 
 const router = Router();
 
@@ -170,27 +174,6 @@ export function detectFuelDelta(previous: number | null, current: number | null)
   return null;
 }
 
-/**
- * Offline window in minutes, from `DEVICE_OFFLINE_MINUTES` (default 15). A
- * device whose `last_seen_at` is older than this is considered offline.
- */
-export function offlineWindowMinutes(): number {
-  const raw = Number(process.env.DEVICE_OFFLINE_MINUTES);
-  return Number.isFinite(raw) && raw > 0 ? raw : 15;
-}
-
-/**
- * True when the device was last seen within the offline window. Handles both
- * the SQLite `YYYY-MM-DD HH:MM:SS` (UTC) form and ISO-8601 timestamps.
- */
-export function isDeviceOnline(lastSeenAt: string | null | undefined, now: number = Date.now()): boolean {
-  if (!lastSeenAt) return false;
-  const iso = lastSeenAt.includes("T") ? lastSeenAt : lastSeenAt.replace(" ", "T") + "Z";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return false;
-  return now - t <= offlineWindowMinutes() * 60 * 1000;
-}
-
 /** Configured fuel-counter IO rows (feature_key 'fuel_counter') with their scale. */
 export function loadFuelCounterRows(): { io_id: number; scale_factor: number }[] {
   return db
@@ -298,7 +281,7 @@ function ignitionValue(input: IngestInput): number {
  * Ingest a single normalized FMB125 telemetry record. Idempotent on
  * (imei, recorded_at): a duplicate insert is ignored and reported.
  */
-router.post("/ingest", requireIngestToken, (req, res, next) => {
+router.post("/ingest", requireIngestToken, async (req, res, next) => {
   try {
     const parsed = ingestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -357,7 +340,17 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
     );
 
     if (insert.changes === 0) {
-      return res.status(200).json({ duplicate: true, message: "Duplicate telemetry record ignored", imei: input.imei, recordedAt });
+      // A duplicate still proves the tracker is online, so stamp it and flush
+      // any commands that were queued while it was away.
+      db.prepare("UPDATE gps_devices SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(device.id);
+      const flushed = await flushQueuedCommandsForImei(input.imei);
+      return res.status(200).json({
+        duplicate: true,
+        message: "Duplicate telemetry record ignored",
+        imei: input.imei,
+        recordedAt,
+        flushed_commands: flushed,
+      });
     }
 
     // Canonical rich telemetry record, idempotent on (imei, recorded_at).
@@ -455,8 +448,18 @@ router.post("/ingest", requireIngestToken, (req, res, next) => {
       }
     }
 
+    // The device has just checked in: flush any commands queued while it was
+    // offline. This is deliberately awaited so the response reflects dispatch.
+    const flushed = await flushQueuedCommandsForImei(input.imei);
+
     const position = db.prepare("SELECT * FROM gps_positions WHERE id = ?").get(posId);
-    return res.status(201).json({ data: position, alerts: alerts.length, fuelCounter, message: "Telemetry ingested" });
+    return res.status(201).json({
+      data: position,
+      alerts: alerts.length,
+      fuelCounter,
+      flushed_commands: flushed,
+      message: "Telemetry ingested",
+    });
   } catch (e) {
     next(e);
   }

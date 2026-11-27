@@ -217,7 +217,7 @@ export interface DeviceFeatures {
   events: DeviceEvent[];
 }
 
-export type CommandStatus = "queued" | "sent" | "acked" | "acknowledged" | "failed";
+export type CommandStatus = "queued" | "sent" | "applied" | "acked" | "acknowledged" | "failed" | "expired";
 
 export interface DeviceCommand {
   id: string;
@@ -225,11 +225,15 @@ export interface DeviceCommand {
   vehicle_id: string | null;
   command_type: "setparam" | "setdigout" | "diagnostic" | "raw" | "camreq";
   payload_json: string;
+  raw_command: string | null;
   status: CommandStatus;
   requested_by: string | null;
+  created_by: string | null;
   created_at: string;
+  updated_at: string | null;
   sent_at: string | null;
   response_text: string | null;
+  response_payload: string | null;
   reason: string | null;
   acked_at: string | null;
   vehicle_number?: string | null;

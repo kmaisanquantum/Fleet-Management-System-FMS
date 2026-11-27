@@ -129,6 +129,18 @@ function migrateExistingDatabase() {
   // device_commands — operator reason + tracker-ack timestamp (Codec 12 replies).
   addColumn("device_commands", "reason", "TEXT");
   addColumn("device_commands", "acked_at", "TEXT");
+  // Bridge/audit contract: exact command string, structured response, creator
+  // alias, and a last-updated timestamp.
+  addColumn("device_commands", "raw_command", "TEXT");
+  addColumn("device_commands", "response_payload", "TEXT");
+  addColumn("device_commands", "created_by", "TEXT");
+  addColumn("device_commands", "updated_at", "TEXT");
+
+  // device_config_state — separate desired/applied values + preset metadata.
+  addColumn("device_config_state", "desired_value", "TEXT");
+  addColumn("device_config_state", "applied_value", "TEXT");
+  addColumn("device_config_state", "preset_key", "TEXT");
+  addColumn("device_config_state", "preset_metadata", "TEXT");
 
   // Client (tenant) scoping — vehicles/devices carry the tenant id; users are
   // mapped to clients through the user_clients join table.
@@ -188,13 +200,38 @@ function migrateExistingDatabase() {
     vehicle_id TEXT REFERENCES vehicles(id),
     command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
     payload_json TEXT,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
+    raw_command TEXT,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'applied', 'acked', 'acknowledged', 'failed', 'expired')),
     requested_by TEXT REFERENCES users(id),
+    created_by TEXT REFERENCES users(id),
     reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     sent_at TEXT,
     response_text TEXT,
+    response_payload TEXT,
     acked_at TEXT
+  );`);
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS device_config_state (
+    id TEXT PRIMARY KEY,
+    imei TEXT NOT NULL,
+    vehicle_id TEXT REFERENCES vehicles(id),
+    param_id INTEGER NOT NULL,
+    feature_key TEXT,
+    value TEXT,
+    desired_value TEXT,
+    applied_value TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'failed')),
+    command_id TEXT REFERENCES device_commands(id),
+    requested_by TEXT REFERENCES users(id),
+    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    applied_at TEXT,
+    response_text TEXT,
+    preset_key TEXT,
+    preset_metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (imei, param_id)
   );`);
   runIgnoreErrors(`CREATE TABLE IF NOT EXISTS device_media (
     id TEXT PRIMARY KEY,
@@ -268,7 +305,12 @@ function migrateExistingDatabase() {
     ('pm-idling-timeout',      'idling_timeout',        1581, 'Excessive idling timeout (seconds)'),
     ('pm-eco-driving',         'eco_driving_threshold', 1582, 'Eco (green) driving sensitivity'),
     ('pm-geofence-radius',     'geofence_radius',       2051, 'Auto geofence radius (metres)'),
-    ('pm-immobilizer-dout',    'immobilizer_dout',      1028, 'DOUT1 / immobiliser control');`);
+    ('pm-immobilizer-dout',    'immobilizer_dout',      1028, 'DOUT1 / immobiliser control'),
+    ('pm-reporting-interval',  'reporting_interval',    100,  'Periodic data-send interval (seconds)'),
+    ('pm-data-acq-ign-on',     'data_acquisition_ignition_on',  104, 'Data acquisition period with ignition ON (seconds)'),
+    ('pm-data-acq-ign-off',    'data_acquisition_ignition_off', 102, 'Data acquisition period with ignition OFF (seconds)'),
+    ('pm-ignition-source',     'ignition_source',       1000, 'Ignition source selection'),
+    ('pm-digital-output',      'digital_output_control', 1028, 'Digital output (DOUT1) control');`);
 
   // Indexes that reference the columns added above (created here so they work
   // on databases that predate those columns).
@@ -277,6 +319,7 @@ function migrateExistingDatabase() {
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_vehicle ON telemetry_records(vehicle_id, recorded_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_telemetry_records_imei ON telemetry_records(imei, recorded_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_commands_imei ON device_commands(imei, created_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_config_state_imei ON device_config_state(imei, updated_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_media_device ON device_media(device_id, captured_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_device_media_captured ON device_media(captured_at DESC);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_vehicles_client ON vehicles(client_id);");
@@ -335,16 +378,29 @@ function migrateExistingDatabase() {
       vehicle_id TEXT REFERENCES vehicles(id),
       command_type TEXT NOT NULL CHECK (command_type IN ('setparam', 'setdigout', 'diagnostic', 'raw', 'camreq')),
       payload_json TEXT,
-      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'acked', 'acknowledged', 'failed')),
+      raw_command TEXT,
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'applied', 'acked', 'acknowledged', 'failed', 'expired')),
       requested_by TEXT REFERENCES users(id),
+      created_by TEXT REFERENCES users(id),
       reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       sent_at TEXT,
       response_text TEXT,
+      response_payload TEXT,
       acked_at TEXT
     );`;
   rebuildIfCheckMissing("device_commands", "acknowledged", deviceCommandsCreateSql);
   rebuildIfCheckMissing("device_commands", "camreq", deviceCommandsCreateSql);
+  rebuildIfCheckMissing("device_commands", "applied", deviceCommandsCreateSql);
+  repairDanglingDeviceConfigStateFk();
+
+  // Backfill the bridge/audit columns on rows created before they existed.
+  runIgnoreErrors("UPDATE device_commands SET created_by = requested_by WHERE created_by IS NULL;");
+  runIgnoreErrors("UPDATE device_commands SET updated_at = COALESCE(acked_at, sent_at, created_at) WHERE updated_at IS NULL;");
+  runIgnoreErrors("UPDATE device_commands SET response_payload = response_text WHERE response_payload IS NULL;");
+  runIgnoreErrors("UPDATE device_config_state SET desired_value = value WHERE desired_value IS NULL;");
+  runIgnoreErrors("UPDATE device_config_state SET applied_value = value WHERE status = 'applied' AND applied_value IS NULL;");
 }
 
 function runIgnoreErrors(sql: string) {
@@ -366,10 +422,63 @@ function rebuildIfCheckMissing(table: string, requiredValue: string, createSql: 
       .join(", ");
 
     db.exec("PRAGMA foreign_keys = OFF;");
+    // Keep SQLite from rewriting other tables' REFERENCES clauses to the
+    // temporary table name during the rename (which would leave them dangling
+    // after the temporary table is dropped).
+    db.exec("PRAGMA legacy_alter_table = ON;");
     db.exec(`ALTER TABLE ${table} RENAME TO ${tmp};`);
     db.exec(createSql);
     db.exec(`INSERT INTO ${table} (${columnNames}) SELECT ${columnNames} FROM ${tmp};`);
     db.exec(`DROP TABLE ${tmp};`);
+    db.exec("PRAGMA legacy_alter_table = OFF;");
+    db.exec("PRAGMA foreign_keys = ON;");
+  } catch (e) {}
+}
+
+/**
+ * Older SQLite builds rewrote `device_config_state.command_id` to reference
+ * the temporary `device_commands__old` table during the device_commands
+ * rebuild. Recreate the config table with the correct reference when detected.
+ */
+function repairDanglingDeviceConfigStateFk() {
+  try {
+    const row = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'device_config_state'")
+      .get() as { sql?: string } | undefined;
+    if (!row?.sql || !row.sql.includes("device_commands__old")) return;
+
+    const columns = (db.prepare("PRAGMA table_info(device_config_state)").all() as { name: string }[])
+      .map((c) => c.name)
+      .join(", ");
+    const createSql = `CREATE TABLE device_config_state (
+      id TEXT PRIMARY KEY,
+      imei TEXT NOT NULL,
+      vehicle_id TEXT REFERENCES vehicles(id),
+      param_id INTEGER NOT NULL,
+      feature_key TEXT,
+      value TEXT,
+      desired_value TEXT,
+      applied_value TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'failed')),
+      command_id TEXT REFERENCES device_commands(id),
+      requested_by TEXT REFERENCES users(id),
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      applied_at TEXT,
+      response_text TEXT,
+      preset_key TEXT,
+      preset_metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (imei, param_id)
+    );`;
+
+    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec("PRAGMA legacy_alter_table = ON;");
+    db.exec("ALTER TABLE device_config_state RENAME TO device_config_state__old;");
+    db.exec(createSql);
+    db.exec(`INSERT INTO device_config_state (${columns}) SELECT ${columns} FROM device_config_state__old;`);
+    db.exec("DROP TABLE device_config_state__old;");
+    db.exec("PRAGMA legacy_alter_table = OFF;");
     db.exec("PRAGMA foreign_keys = ON;");
   } catch (e) {}
 }

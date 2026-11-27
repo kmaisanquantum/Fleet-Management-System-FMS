@@ -111,9 +111,9 @@ describe("Device commands router", () => {
 
     imeiA = `35401999${s}`;
     imeiB = `35401888${s}`;
-    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status) VALUES (?, ?, ?, 'teltonika', ?, 'active')")
+    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status, last_seen_at) VALUES (?, ?, ?, 'teltonika', ?, 'active', datetime('now'))")
       .run(uuid(), vehicleAId, imeiA, clientAId);
-    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status) VALUES (?, ?, ?, 'teltonika', ?, 'active')")
+    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status, last_seen_at) VALUES (?, ?, ?, 'teltonika', ?, 'active', datetime('now'))")
       .run(uuid(), vehicleBId, imeiB, clientBId);
 
     // Moving / slow vehicles for the ignition-cut speed guard. The guard reads
@@ -124,7 +124,7 @@ describe("Device commands router", () => {
       VALUES (?, ?, ?, 'Isuzu', 'D-Max', 'Utility', 'Diesel', 'Ops', ?, 'active')
     `).run(vehicleMovingId, `CMD-VM-${s}`, `CMD-RM-${s}`, clientAId);
     imeiMoving = `35401777${s}`;
-    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status) VALUES (?, ?, ?, 'teltonika', ?, 'active')")
+    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status, last_seen_at) VALUES (?, ?, ?, 'teltonika', ?, 'active', datetime('now'))")
       .run(uuid(), vehicleMovingId, imeiMoving, clientAId);
     db.prepare("INSERT INTO telemetry_records (id, imei, vehicle_id, recorded_at, speed_kmh) VALUES (?, ?, ?, datetime('now'), 60)")
       .run(uuid(), imeiMoving, vehicleMovingId);
@@ -135,7 +135,7 @@ describe("Device commands router", () => {
       VALUES (?, ?, ?, 'Isuzu', 'D-Max', 'Utility', 'Diesel', 'Ops', ?, 'active')
     `).run(vehicleSlowId, `CMD-VS-${s}`, `CMD-RS-${s}`, clientAId);
     imeiSlow = `35401666${s}`;
-    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status) VALUES (?, ?, ?, 'teltonika', ?, 'active')")
+    db.prepare("INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, client_id, status, last_seen_at) VALUES (?, ?, ?, 'teltonika', ?, 'active', datetime('now'))")
       .run(uuid(), vehicleSlowId, imeiSlow, clientAId);
     // Exactly at the limit: the guard blocks only speeds strictly above 10 km/h.
     db.prepare("INSERT INTO telemetry_records (id, imei, vehicle_id, recorded_at, speed_kmh) VALUES (?, ?, ?, datetime('now'), 10)")
@@ -293,12 +293,12 @@ describe("Device commands router", () => {
     expect(body.data.response_text).toContain("boom");
   });
 
-  it("marks a command failed when the command endpoint is unreachable", async () => {
+  it("keeps a command queued for retry when the command endpoint is unreachable", async () => {
     stubRelay(() => Promise.reject(new Error("ECONNREFUSED")));
     const { status, body } = await post("/", { imei: imeiA, type: "setdigout", params: { dout: 0 } }, adminToken);
     expect(status).toBe(201);
-    expect(body.data.status).toBe("failed");
-    expect(body.data.response_text).toMatch(/unreachable/i);
+    expect(body.data.status).toBe("queued");
+    expect(body.data.response_text).toMatch(/unreachable|retry/i);
   });
 
   /* ------------------------- immobilizer audit ---------------------- */
@@ -448,12 +448,12 @@ describe("Device commands router", () => {
     // The VPS posts the tracker's reply, authenticated with the ingest token.
     const ack = await post("/ack", { imei: imeiA, cmd: "setparam 1580:77", reply: "OK 1580:77" }, INGEST_TOKEN);
     expect(ack.status).toBe(200);
-    expect(ack.body.data.status).toBe("acknowledged");
+    expect(ack.body.data.status).toBe("applied");
     expect(ack.body.data.response_text).toBe("OK 1580:77");
     expect(ack.body.data.acked_at).toBeTruthy();
 
     const row = db.prepare("SELECT status, response_text, acked_at FROM device_commands WHERE id = ?").get(issued.body.data.id) as any;
-    expect(row.status).toBe("acknowledged");
+    expect(row.status).toBe("applied");
     expect(row.response_text).toBe("OK 1580:77");
     expect(row.acked_at).toBeTruthy();
   });

@@ -103,7 +103,7 @@ describe("MeshSat map proxy", () => {
       () => new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }),
       calls,
     );
-    await fetch(`${baseUrl}/api/positions?client=abc&fms_token=${fmsToken}`, {
+    await fetch(`${baseUrl}/api/positions?client=abc&fms_token=${fmsToken}&retry=123`, {
       headers: { Authorization: `Bearer ${fmsToken}` },
     });
     expect(calls[0].url).toBe(`${MAP_ORIGIN}/api/positions?client=abc`);
@@ -303,6 +303,26 @@ describe("MeshSat map proxy", () => {
     expect(html).toContain("arcgisonline.com");
     expect(html).not.toContain("cartocdn");
     expect(html).not.toContain("CARTO");
+  });
+
+  it("injects the same-origin map hardening shim", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response("<html><head></head><body><div id=\"hud\"></div></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map?fms_token=${fmsToken}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("fms-map-auth-error");
+    expect(html).toContain("fms-map-tile-error");
+    expect(html).toContain("fms-map-ready");
+    expect(html).toContain("World_Topo_Map");
+    expect(html).toContain("tile.openstreetmap.org");
+    expect(html).toContain("fms_token");
   });
 });
 

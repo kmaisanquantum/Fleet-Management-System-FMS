@@ -229,6 +229,73 @@ export function applyTileSource(html: string): string {
 }
 
 /**
+ * Adds a small same-origin client shim to the proxied map document:
+ *  - forwards the iframe's `?fms_token=` to its own `/api/meshsat-map/*` fetch
+ *    calls, so polling keeps working when a browser blocks the HttpOnly cookie;
+ *  - falls back from the Esri Street basemap to Esri Topo and then OSM if a
+ *    tile fails, instead of leaving broken-tile errors in the map;
+ *  - notifies the parent FMS page about auth/tile failures so it can show a
+ *    friendly retry banner rather than raw error text.
+ */
+export function injectMapClientHardening(html: string): string {
+  const script = `<script>(function () {
+  var token = null;
+  try { token = new URLSearchParams(location.search).get('fms_token'); } catch (e) {}
+  var origFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (origFetch) {
+    window.fetch = function (input, init) {
+      try {
+        var url;
+        if (typeof input === 'string') url = new URL(input, location.href);
+        else if (input instanceof Request) url = new URL(input.url);
+        else url = new URL(String(input), location.href);
+        if (token && url.origin === location.origin && url.pathname.indexOf('/api/meshsat-map/') === 0 && !url.searchParams.has('fms_token')) {
+          url.searchParams.set('fms_token', token);
+          if (typeof input === 'string') input = url.pathname + url.search;
+          else if (input instanceof Request) input = new Request(url.toString(), input);
+          else input = url.toString();
+        }
+      } catch (e) {}
+      return origFetch(input, init).then(function (res) {
+        if (res.status === 401 || res.status === 403) {
+          var hud = document.getElementById('hud');
+          if (hud) hud.textContent = 'Map session expired. Reconnecting...';
+          try { window.parent.postMessage({ type: 'fms-map-auth-error', status: res.status }, location.origin); } catch (e) {}
+        }
+        return res;
+      });
+    };
+  }
+  document.addEventListener('error', function (event) {
+    var img = event.target;
+    if (!img || img.tagName !== 'IMG' || !img.classList || !img.classList.contains('leaflet-tile')) return;
+    var src = img.getAttribute('src') || '';
+    if (src.indexOf('World_Street_Map') !== -1 && !img.dataset.fmsTopo) {
+      img.dataset.fmsTopo = '1';
+      img.src = src.replace('/World_Street_Map/', '/World_Topo_Map/');
+      return;
+    }
+    if (src.indexOf('arcgisonline.com') !== -1 && !img.dataset.fmsOsm) {
+      img.dataset.fmsOsm = '1';
+      var m = src.match(/\\/tile\\/(\\d+)\\/(\\d+)\\/(\\d+)$/);
+      if (m) { img.src = 'https://tile.openstreetmap.org/' + m[1] + '/' + m[3] + '/' + m[2] + '.png'; return; }
+    }
+    img.classList.add('fms-tile-failed');
+    try { window.parent.postMessage({ type: 'fms-map-tile-error' }, location.origin); } catch (e) {}
+  }, true);
+  window.addEventListener('load', function () {
+    try { window.parent.postMessage({ type: 'fms-map-ready' }, location.origin); } catch (e) {}
+  });
+  var style = document.createElement('style');
+  style.textContent = '.leaflet-tile.fms-tile-failed{visibility:hidden}';
+  document.head.appendChild(style);
+})();</script>`;
+
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${script}</head>`);
+  return `${script}${html}`;
+}
+
+/**
  * Lightweight session roll-forward. The SPA calls this with a fresh access token
  * after it refreshes so the map's HttpOnly cookie is renewed without reloading
  * the iframe (which would reset the user's map position).
@@ -282,7 +349,7 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
 
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(req.query)) {
-    if (key === "fms_token") continue;
+    if (key === "fms_token" || key === "retry") continue;
     if (Array.isArray(value)) value.forEach((v) => params.append(key, String(v)));
     else if (value !== undefined && value !== null) params.append(key, String(value));
   }
@@ -319,7 +386,7 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
     // what makes a previously blocked tile provider reappear.
     res.setHeader("cache-control", "no-store");
     const html = await upstream.text();
-    res.send(applyTileSource(rewriteMeshSatUrls(html, origin)));
+    res.send(injectMapClientHardening(applyTileSource(rewriteMeshSatUrls(html, origin))));
     return;
   }
 
