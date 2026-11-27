@@ -35,6 +35,24 @@ const PROXY_PREFIX = "/api/meshsat-map";
  */
 const PROXY_USER_AGENT = "FleetManagementSystem/1.0 (fleet.dspng.tech)";
 
+/** Leaflet version used by the upstream map; assets are proxied to avoid CDN blocks. */
+const LEAFLET_VERSION = "1.9.4";
+const LEAFLET_ASSET_PATHS = new Set([
+  "leaflet.css",
+  "leaflet.js",
+  "images/marker-icon.png",
+  "images/marker-icon-2x.png",
+  "images/marker-shadow.png",
+  "images/layers.png",
+  "images/layers-2x.png",
+]);
+const LEAFLET_ASSET_CONTENT_TYPES: Record<string, string> = {
+  css: "text/css; charset=utf-8",
+  js: "application/javascript; charset=utf-8",
+  png: "image/png",
+  svg: "image/svg+xml",
+};
+
 /** Cookie that carries the FMS JWT for the map's same-origin sub-requests. */
 export const MAP_COOKIE_NAME = "fms_map_token";
 const MAP_COOKIE_MAX_AGE_MS = 15 * 60 * 1000;
@@ -154,6 +172,14 @@ export function sanitizeUpstreamHeaders(headers: Headers): Record<string, string
  */
 export function rewriteMeshSatUrls(html: string, origin: string): string {
   let out = html.split(origin).join(PROXY_PREFIX);
+  // The upstream map loads Leaflet from unpkg. Serve those assets through the
+  // proxy so browsers or network policies that block third-party CDNs still
+  // render the map.
+  for (const scheme of ["https://", "http://", "//"]) {
+    out = out
+      .split(`${scheme}unpkg.com/leaflet@${LEAFLET_VERSION}/dist/`)
+      .join(`${PROXY_PREFIX}/vendor/leaflet/`);
+  }
   // A single leading slash is a root-relative FMS path; `//` starts an absolute
   // third-party URL, and already-proxied paths are left untouched.
   out = out.replace(/(src|href|action)=("|')\/(?!\/|api\/meshsat-map)/gi, `$1=$2${PROXY_PREFIX}/`);
@@ -211,6 +237,44 @@ router.get("/session", requireMapAuth, (_req: Request, res: ExpressResponse) => 
   res.status(204).end();
 });
 
+/**
+ * Leaflet assets used by the upstream map. They are fetched server-side and
+ * served same-origin so a browser/network that blocks unpkg can still render
+ * the map. Only the known Leaflet 1.9.4 files are accepted.
+ */
+router.get("/vendor/leaflet/*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
+  const assetPath = req.path.replace(/^\/vendor\/leaflet\//, "");
+  if (!LEAFLET_ASSET_PATHS.has(assetPath)) {
+    return res.status(404).json({ error: "Unknown Leaflet asset" });
+  }
+
+  const extension = assetPath.split(".").pop() || "";
+  const contentType = LEAFLET_ASSET_CONTENT_TYPES[extension] || "application/octet-stream";
+  const mirrors = [
+    `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/${assetPath}`,
+    `https://cdn.jsdelivr.net/npm/leaflet@${LEAFLET_VERSION}/dist/${assetPath}`,
+  ];
+
+  for (const mirror of mirrors) {
+    try {
+      const upstream = await fetch(mirror, {
+        headers: { "user-agent": PROXY_USER_AGENT },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!upstream.ok || !upstream.body) continue;
+      res.setHeader("content-type", contentType);
+      res.setHeader("cache-control", "public, max-age=86400");
+      res.setHeader("x-content-type-options", "nosniff");
+      Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
+      return;
+    } catch {
+      // Try the next mirror.
+    }
+  }
+
+  return res.status(502).json({ error: "Leaflet assets unavailable" });
+});
+
 // Proxy every GET under /api/meshsat-map, preserving the sub-path and query string.
 router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
   const origin = mapOrigin();
@@ -251,6 +315,9 @@ router.get("*", requireMapAuth, async (req: Request, res: ExpressResponse) => {
 
   const contentType = upstream.headers.get("content-type") || "";
   if (contentType.includes("text/html")) {
+    // Basemap/provider fixes must reach browsers immediately; stale HTML is
+    // what makes a previously blocked tile provider reappear.
+    res.setHeader("cache-control", "no-store");
     const html = await upstream.text();
     res.send(applyTileSource(rewriteMeshSatUrls(html, origin)));
     return;
