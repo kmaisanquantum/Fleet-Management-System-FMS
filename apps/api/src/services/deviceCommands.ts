@@ -15,6 +15,7 @@ export const DIAGNOSTIC_COMMANDS = new Set([
   "getgps",
   "getver",
   "getstatus",
+  "getio",
   "readio",
   "getparam",
 ]);
@@ -234,6 +235,52 @@ export async function forwardCommand(
     return { ok: res.ok, status: res.status, text };
   } catch (err: any) {
     return { ok: false, status: 0, text: `Command endpoint unreachable: ${err?.message ?? String(err)}`, transportError: true };
+  }
+}
+
+export interface BridgeDevicesResult {
+  ok: boolean;
+  status: number;
+  data: unknown;
+  text: string;
+  configured: boolean;
+}
+
+/**
+ * Reads the bridge's device inventory (`GET /api/devices`). Used by the
+ * configurator's IMEI selector so operators see MeshSat's online state, not
+ * only the FMS ingest cache.
+ */
+export async function fetchBridgeDevices(): Promise<BridgeDevicesResult> {
+  const bridgeBase = process.env.MESHSAT_BRIDGE_URL?.trim();
+  if (!bridgeBase) {
+    return { ok: false, status: 0, data: null, text: "MESHSAT_BRIDGE_URL is not configured", configured: false };
+  }
+  const base = bridgeBase.replace(/\/+$/, "");
+  const endpoint = base.endsWith("/api/devices") ? base : `${base}/api/devices`;
+  const token = process.env.MESHSAT_BRIDGE_TOKEN || process.env.MESHSAT_API_KEY || process.env.MESHSAT_CMD_TOKEN || "";
+  try {
+    const res = await fetch(endpoint, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(Number(process.env.MESHSAT_TIMEOUT_MS) || 5000),
+    });
+    const text = await res.text().catch(() => "");
+    let data: unknown = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+    return { ok: res.ok, status: res.status, data, text, configured: true };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      text: `Bridge unreachable: ${err?.message ?? String(err)}`,
+      configured: true,
+    };
   }
 }
 

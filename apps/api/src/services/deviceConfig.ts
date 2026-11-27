@@ -383,3 +383,78 @@ function parsePayload(command: ConfigCommandRow): Record<string, unknown> | null
     return null;
   }
 }
+
+export interface DeviceInfoSnapshot {
+  firmware_version: string | null;
+  updated_at: string | null;
+  info: Record<string, unknown> | null;
+}
+
+/** Latest persisted tracker identity reply for an IMEI. */
+export function getDeviceInfoSnapshot(imei: string): DeviceInfoSnapshot {
+  const row = db
+    .prepare("SELECT firmware_version, device_info_json, device_info_updated_at FROM gps_devices WHERE device_identifier = ?")
+    .get(imei) as
+    | { firmware_version: string | null; device_info_json: string | null; device_info_updated_at: string | null }
+    | undefined;
+  if (!row) return { firmware_version: null, updated_at: null, info: null };
+
+  let info: Record<string, unknown> | null = null;
+  if (row.device_info_json) {
+    try {
+      const parsed = JSON.parse(row.device_info_json);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) info = parsed as Record<string, unknown>;
+    } catch {
+      info = { raw: row.device_info_json };
+    }
+  }
+  return { firmware_version: row.firmware_version, updated_at: row.device_info_updated_at, info };
+}
+
+/** Extracts a Teltonika firmware string such as `03.25.15 Rev:32`. */
+export function extractFirmwareVersion(reply: string): string | null {
+  const match = reply.match(/\b0\d\.\d{2}\.\d{2}(?:\s*Rev[:.]?\s*\d+)?/i);
+  return match ? match[0].replace(/\s+/g, " ").trim() : null;
+}
+
+/**
+ * Persists a tracker identity reply (`getinfo`, `getver`, `getstatus`, `getio`)
+ * so the configurator header can render firmware and device details without
+ * replaying the command log.
+ */
+export function recordDeviceInfoReply(imei: string, kind: string, reply: string | null): void {
+  if (!reply) return;
+  const row = db
+    .prepare("SELECT firmware_version, device_info_json FROM gps_devices WHERE device_identifier = ?")
+    .get(imei) as { firmware_version: string | null; device_info_json: string | null } | undefined;
+  if (!row) return;
+
+  let info: Record<string, unknown> = {};
+  if (row.device_info_json) {
+    try {
+      const parsed = JSON.parse(row.device_info_json);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) info = parsed as Record<string, unknown>;
+    } catch {
+      info = { raw: row.device_info_json };
+    }
+  }
+
+  let value: unknown = reply;
+  try {
+    value = JSON.parse(reply);
+  } catch {
+    // Plain-text tracker reply.
+  }
+
+  const timestamp = nowSql();
+  const firmware = extractFirmwareVersion(reply) ?? row.firmware_version ?? null;
+  info[kind] = value;
+  info.last_reply_kind = kind;
+  info.last_reply_at = timestamp;
+
+  db.prepare(`
+    UPDATE gps_devices
+    SET firmware_version = ?, device_info_json = ?, device_info_updated_at = ?, updated_at = ?
+    WHERE device_identifier = ?
+  `).run(firmware, JSON.stringify(info), timestamp, timestamp, imei);
+}

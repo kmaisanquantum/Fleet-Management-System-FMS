@@ -178,6 +178,10 @@ CREATE TABLE IF NOT EXISTS gps_devices (
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'maintenance')),
   -- Wall-clock time of the most recent successful ingest for this device.
   last_seen_at TEXT,
+  -- Latest firmware / tracker identity reply captured by the configurator.
+  firmware_version TEXT,
+  device_info_json TEXT,
+  device_info_updated_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

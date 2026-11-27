@@ -82,6 +82,44 @@ describe("MeshSat map proxy", () => {
     expect(res.status).toBe(401);
   });
 
+  it("reports unavailable without calling upstream when MESHSAT_MAP_AUTH is unset", async () => {
+    const saved = process.env.MESHSAT_MAP_AUTH;
+    delete process.env.MESHSAT_MAP_AUTH;
+    const calls: UpstreamCall[] = [];
+    mockUpstream(() => new Response("", { status: 200 }), calls);
+    try {
+      const res = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { available: boolean; configured: boolean };
+      expect(body.available).toBe(false);
+      expect(body.configured).toBe(false);
+      expect(calls).toHaveLength(0);
+    } finally {
+      process.env.MESHSAT_MAP_AUTH = saved;
+    }
+  });
+
+  it("reports the MeshSat map available when the upstream answers 200", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(() => new Response("<html></html>", { status: 200 }), calls);
+    const res = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ available: true, configured: true });
+    expect(calls[0].url).toBe(`${MAP_ORIGIN}/map`);
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe(EXPECTED_BASIC);
+  });
+
+  it("reports the MeshSat map unavailable when the upstream rejects the credential", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(() => new Response("", { status: 401 }), calls);
+    const res = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { available: boolean; status: number; reason: string };
+    expect(body.available).toBe(false);
+    expect(body.status).toBe(401);
+    expect(body.reason).toContain("HTTP 401");
+  });
+
   it("injects the upstream Basic Authorization and User-Agent headers", async () => {
     const calls: UpstreamCall[] = [];
     mockUpstream(
@@ -227,6 +265,28 @@ describe("MeshSat map proxy", () => {
     expect(res.status).toBe(204);
     expect(res.headers.get("set-cookie") || "").toContain("fms_map_token=");
     expect(calls).toHaveLength(0);
+  });
+
+  it("sets the session cookie from a Bearer-authenticated /session call", async () => {
+    const res = await fetch(`${baseUrl}/session`, {
+      headers: { Authorization: `Bearer ${fmsToken}` },
+    });
+    expect(res.status).toBe(204);
+    const cookie = res.headers.get("set-cookie") || "";
+    expect(cookie).toContain("fms_map_token=");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Path=/api/meshsat-map");
+  });
+
+  it("does not set the map cookie on an ordinary Bearer map request", async () => {
+    const calls: UpstreamCall[] = [];
+    mockUpstream(
+      () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+      calls,
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("serves Leaflet assets through the proxy", async () => {

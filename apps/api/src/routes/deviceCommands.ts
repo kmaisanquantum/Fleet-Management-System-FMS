@@ -5,7 +5,7 @@ import { requireAuth, requireIngestToken } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
-import { applyConfigAck, parseTrackerReply, ConfigValue } from "../services/deviceConfig";
+import { applyConfigAck, parseTrackerReply, recordDeviceInfoReply, ConfigValue } from "../services/deviceConfig";
 import {
   buildCommand,
   COMMAND_ROLES,
@@ -83,6 +83,22 @@ router.post("/ack", requireIngestToken, (req, res, next) => {
 
     const commandRow = db.prepare("SELECT * FROM device_commands WHERE id = ?").get(match.id) as any;
     applyConfigAck(commandRow, reply);
+    try {
+      const payload = commandRow.payload_json ? JSON.parse(commandRow.payload_json) : null;
+      const kind =
+        payload?.type === "diagnostic"
+          ? String(payload.command ?? "")
+          : payload?.type === "getparam"
+            ? "getparam"
+            : payload?.type === "raw"
+              ? String(payload.command ?? "raw")
+              : "";
+      if (["getinfo", "getver", "getstatus", "getio", "getgps", "readio"].includes(kind)) {
+        recordDeviceInfoReply(imei, kind, reply);
+      }
+    } catch {
+      // A malformed stored payload must not block the ack.
+    }
 
     res.json({
       data: { ...commandRow, status: normalizeCommandStatus(commandRow.status) },

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { getToken, isTokenExpiring, refreshAccessToken, subscribeToken } from "../api/client";
+import FleetLiveMap from "../components/FleetLiveMap";
 
 /**
  * Live Fleet Map — embeds the MeshSat map UI.
@@ -7,10 +8,10 @@ import { getToken, isTokenExpiring, refreshAccessToken, subscribeToken } from ".
  * `meshsat.dspng.space` is protected by HTTP Basic auth, which a browser cannot
  * send from inside an `<iframe>`. The FMS backend therefore proxies the map at
  * `/api/meshsat-map/map`, injecting the credential server-side, and rewrites the
- * page's asset/data URLs to flow back through the proxy. We authenticate the
- * iframe navigation with the FMS JWT as `?fms_token=` (an iframe cannot set an
- * `Authorization` header); the proxy exchanges it for a short-lived cookie so the
- * map's own data-endpoint polls stay authenticated.
+ * page's asset/data URLs to flow back through the proxy. The page calls
+ * `/api/meshsat-map/session` with a Bearer token to obtain a short-lived,
+ * HttpOnly cookie, then loads the iframe without any token in its URL. The map's
+ * own data-endpoint polls authenticate with that cookie.
  *
  * Access tokens live for 15 minutes. This page keeps the map alive across that
  * boundary: it refreshes the FMS token before expiry and rolls the proxy's
@@ -21,6 +22,7 @@ import { getToken, isTokenExpiring, refreshAccessToken, subscribeToken } from ".
  * set `VITE_MESHSAT_MAP_URL` to bypass the proxy and embed that URL directly.
  */
 const PROXY_MAP_PATH = "/api/meshsat-map/map";
+const MAP_HEALTH_PATH = "/api/meshsat-map/health";
 const MAP_SESSION_PATH = "/api/meshsat-map/session";
 const OVERRIDE_MAP_URL = import.meta.env.VITE_MESHSAT_MAP_URL as string | undefined;
 
@@ -31,7 +33,8 @@ const REFRESH_SKEW_MS = 2 * 60_000;
 
 async function rollMapSession(token: string): Promise<void> {
   try {
-    await fetch(`${MAP_SESSION_PATH}?fms_token=${encodeURIComponent(token)}`, {
+    await fetch(MAP_SESSION_PATH, {
+      headers: { Authorization: `Bearer ${token}` },
       credentials: "same-origin",
       cache: "no-store",
     });
@@ -41,7 +44,8 @@ async function rollMapSession(token: string): Promise<void> {
 }
 
 export default function LiveFleetMap() {
-  const [mapUrl, setMapUrl] = useState<string | null>(null);
+  const [mapUrl, setMapUrl] = useState<string | null>(OVERRIDE_MAP_URL ?? null);
+  const [mapMode, setMapMode] = useState<"meshsat" | "native">(OVERRIDE_MAP_URL ? "meshsat" : "native");
   const [missingAuth, setMissingAuth] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const iframeLoadedRef = useRef(false);
@@ -50,6 +54,7 @@ export default function LiveFleetMap() {
   useEffect(() => {
     if (OVERRIDE_MAP_URL) {
       setMapUrl(OVERRIDE_MAP_URL);
+      setMapMode("meshsat");
       return;
     }
 
@@ -62,8 +67,10 @@ export default function LiveFleetMap() {
         setMissingAuth(true);
         return;
       }
+      await rollMapSession(token);
+      if (cancelled) return;
       iframeLoadedRef.current = true;
-      setMapUrl(`${PROXY_MAP_PATH}?fms_token=${encodeURIComponent(token)}`);
+      setMapUrl(PROXY_MAP_PATH);
     })();
 
     return () => {
@@ -86,7 +93,7 @@ export default function LiveFleetMap() {
         void rollMapSession(token);
       } else {
         iframeLoadedRef.current = true;
-        setMapUrl(`${PROXY_MAP_PATH}?fms_token=${encodeURIComponent(token)}`);
+        void rollMapSession(token).then(() => setMapUrl(PROXY_MAP_PATH));
       }
     });
   }, []);
@@ -101,6 +108,18 @@ export default function LiveFleetMap() {
     return () => window.clearInterval(id);
   }, []);
 
+  function onIframeLoad(event: SyntheticEvent<HTMLIFrameElement>) {
+    try {
+      const text = event.currentTarget.contentDocument?.body?.innerText ?? "";
+      if (/basic realm|restricted|invalid or expired token|missing fms token/i.test(text)) {
+        setMapMode("native");
+        setMapError("MeshSat map authentication failed; showing the FMS live map instead.");
+      }
+    } catch {
+      // Cross-origin iframe (override mode); leave it alone.
+    }
+  }
+
   const reloadMap = useCallback(async () => {
     if (OVERRIDE_MAP_URL || reloadInFlightRef.current) return;
     reloadInFlightRef.current = true;
@@ -110,19 +129,53 @@ export default function LiveFleetMap() {
       if (!token) {
         setMissingAuth(true);
         setMapUrl(null);
+        setMapMode("native");
         return;
       }
       setMissingAuth(false);
       await rollMapSession(token);
       iframeLoadedRef.current = true;
       setMapError(null);
-      // The cache-buster forces a fresh iframe navigation while keeping the
-      // fresh token in the proxy URL.
-      setMapUrl(`${PROXY_MAP_PATH}?fms_token=${encodeURIComponent(token)}&retry=${Date.now()}`);
+      setMapMode("meshsat");
+      // The cache-buster forces a fresh iframe navigation after the session
+      // cookie has been rolled forward.
+      setMapUrl(`${PROXY_MAP_PATH}?retry=${Date.now()}`);
     } finally {
       reloadInFlightRef.current = false;
     }
   }, []);
+
+  const openMeshSatMap = useCallback(async () => {
+    if (OVERRIDE_MAP_URL) {
+      setMapUrl(OVERRIDE_MAP_URL);
+      setMapMode("meshsat");
+      return;
+    }
+    let token = getToken();
+    if (isTokenExpiring(token)) token = await refreshAccessToken();
+    if (!token) {
+      setMissingAuth(true);
+      setMapMode("native");
+      return;
+    }
+    setMapError(null);
+    try {
+      const res = await fetch(MAP_HEALTH_PATH, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      const health = await res.json().catch(() => ({}));
+      if (!res.ok || !health.available) {
+        setMapMode("native");
+        setMapError(health.reason || "MeshSat map is unavailable; using the FMS live map.");
+        return;
+      }
+      await reloadMap();
+    } catch {
+      setMapMode("native");
+      setMapError("MeshSat map is unreachable; using the FMS live map.");
+    }
+  }, [reloadMap]);
 
   useEffect(() => {
     if (OVERRIDE_MAP_URL) return;
@@ -147,8 +200,20 @@ export default function LiveFleetMap() {
   return (
     <div className="space-y-4">
       {/* Page Title */}
-      <div>
-        <h1 className="text-2xl font-bold text-ink-100">Live Fleet Map</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-ink-100">Live Fleet Map</h1>
+          <p className="text-xs text-ink-500 mt-1">
+            {mapMode === "native"
+              ? "FMS live positions · native map"
+              : "MeshSat map embedded through the authenticated FMS proxy"}
+          </p>
+        </div>
+        {mapMode === "native" && !OVERRIDE_MAP_URL && (
+          <button onClick={() => void openMeshSatMap()} className="btn-secondary text-xs px-3 py-2">
+            Open MeshSat map
+          </button>
+        )}
       </div>
 
       {missingAuth && (
@@ -161,22 +226,37 @@ export default function LiveFleetMap() {
       {mapError && (
         <div className="flex items-center justify-between gap-3 p-3 rounded-lg border border-amber-400/40 bg-amber-400/10 text-amber-300 text-xs">
           <span>{mapError}</span>
-          <button onClick={() => void reloadMap()} className="btn-secondary text-xs px-3 py-1.5 whitespace-nowrap">
-            Retry
+          <button
+            onClick={() => void (mapMode === "native" ? openMeshSatMap() : reloadMap())}
+            className="btn-secondary text-xs px-3 py-1.5 whitespace-nowrap"
+          >
+            {mapMode === "native" ? "Try MeshSat" : "Retry"}
           </button>
         </div>
       )}
 
-      {/* MeshSat map (embedded via the FMS proxy) */}
-      <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
-        {mapUrl ? (
-          <iframe src={mapUrl} title="Live Fleet Map" className="w-full h-full border-0" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-ink-400 text-sm">
-            {missingAuth ? "Live map unavailable" : "Loading live map…"}
-          </div>
-        )}
-      </div>
+      {missingAuth ? (
+        <div className="bg-base-900 border border-base-700 rounded-xl h-[calc(100vh-200px)] min-h-[520px] flex items-center justify-center text-ink-400 text-sm">
+          Live map unavailable
+        </div>
+      ) : mapMode === "native" ? (
+        <FleetLiveMap />
+      ) : (
+        <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
+          {mapUrl ? (
+            <iframe
+              src={mapUrl}
+              title="Live Fleet Map"
+              className="w-full h-full border-0"
+              onLoad={onIframeLoad}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-ink-400 text-sm">
+              Loading live map…
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

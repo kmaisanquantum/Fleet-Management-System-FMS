@@ -379,4 +379,76 @@ describe("Remote device configuration router", () => {
     const commands = gateway.mock.calls.map((c) => JSON.parse((c[1] as any).body).command);
     expect(commands).toEqual(expect.arrayContaining(["setparam 100:45", "setparam 100:45"]));
   });
+
+  it("serves the central Teltonika registry with all Configurator sections", async () => {
+    const { status, body } = await get("/api/devices/registry", adminToken);
+    expect(status).toBe(200);
+    expect(body.data.model).toBe("FMB125");
+    expect(body.data.sections).toHaveLength(20);
+    expect(body.data.sections.map((s: any) => s.key)).toEqual(
+      expect.arrayContaining(["status", "security", "system", "gprs", "data-acquisition", "features", "rs232"])
+    );
+    const features = body.data.sections.find((s: any) => s.key === "features");
+    expect(features.features.map((f: any) => f.key)).toEqual(
+      expect.arrayContaining(["overspeeding", "immobilizer", "gnss-fuel-counter", "network-jamming", "ibutton-read-notification", "dout-control-via-ignition"])
+    );
+    const overspeeding = features.features.find((f: any) => f.key === "overspeeding");
+    expect(overspeeding.fields.map((f: any) => f.paramId)).toEqual(
+      expect.arrayContaining([11100, 11104, 11103, 11101, 11102, 7032, 8032])
+    );
+  });
+
+  it("lists devices for the IMEI selector", async () => {
+    const { status, body } = await get("/api/devices", adminToken);
+    expect(status).toBe(200);
+    expect(body.data.some((d: any) => d.imei === imei)).toBe(true);
+    expect(body.data.find((d: any) => d.imei === imei).online).toBe(true);
+  });
+
+  it("queues identity commands and active parameter reads for Load from device", async () => {
+    const gateway = stubGateway(() => fakeResponse(true, 202, "{}"));
+    const { status, body } = await post(
+      `/api/devices/${imei}/load`,
+      { param_ids: [11100, 11104], reason: "test load" },
+      adminToken
+    );
+    expect(status).toBe(201);
+    expect(body.data.param_ids).toEqual([11100, 11104]);
+    expect(body.data.commands).toHaveLength(6);
+    const sent = gateway.mock.calls.map((c) => JSON.parse((c[1] as any).body).command);
+    expect(sent).toEqual(
+      expect.arrayContaining(["getinfo", "getver", "getstatus", "getio", "getparam 11100", "getparam 11104"])
+    );
+  });
+
+  it("requires explicit confirmation before queuing cpureset", async () => {
+    const gateway = stubGateway(() => fakeResponse(true, 202, "{}"));
+    const rejected = await post(`/api/devices/${imei}/reboot`, { reason: "test" }, adminToken);
+    expect(rejected.status).toBe(400);
+    expect(gateway).not.toHaveBeenCalled();
+
+    const rebooted = await post(`/api/devices/${imei}/reboot`, { confirm: true, reason: "test reboot" }, adminToken);
+    expect(rebooted.status).toBe(201);
+    expect(rebooted.body.data.command).toBe("cpureset");
+    expect(JSON.parse((gateway.mock.calls[0][1] as any).body).command).toBe("cpureset");
+  });
+
+  it("persists firmware from getver acks and exposes it in the config view", async () => {
+    stubGateway(() => fakeResponse(true, 202, "{}"));
+    const issued = await post(`/api/devices/${imei}/command`, { type: "getver" }, adminToken);
+    expect(issued.status).toBe(201);
+
+    const ack = await post(
+      "/api/telemetry/commands/ack",
+      { imei, cmd: "getver", reply: "FMB125 FW 03.25.15 Rev:32" },
+      INGEST_TOKEN
+    );
+    expect(ack.status).toBe(200);
+
+    const { status, body } = await get(`/api/devices/${imei}/config`, adminToken);
+    expect(status).toBe(200);
+    expect(body.data.firmware_version).toBe("03.25.15 Rev:32");
+    expect(body.data.device_info).toBeTruthy();
+    expect(body.data.device_info.last_reply_kind).toBe("getver");
+  });
 });
