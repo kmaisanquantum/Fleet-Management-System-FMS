@@ -128,6 +128,11 @@ export interface Vehicle {
   insurance_policy: string | null;
   insurance_expiry: string | null;
   registration_expiry: string | null;
+  gps_device_id: string | null;
+  gps_imei: string | null;
+  gps_device_type: "meshsat" | "teltonika" | null;
+  gps_device_model: "FMB125" | "FMC130" | "FMC650" | "FMB920" | "DUALCAM" | null;
+  gps_device_status: "active" | "inactive" | "maintenance" | null;
   created_at: string;
   updated_at: string;
 }

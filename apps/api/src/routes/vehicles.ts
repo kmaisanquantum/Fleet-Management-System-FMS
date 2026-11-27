@@ -11,25 +11,41 @@ router.use(requireAuth);
 
 const FLEET_WRITE_ROLES = ["admin", "fleet_admin", "fleet_manager"];
 
+const GPS_DEVICE_TYPES = ["meshsat", "teltonika"] as const;
+const GPS_DEVICE_MODELS = ["FMB125", "FMC130", "FMC650", "FMB920", "DUALCAM"] as const;
+const GPS_DEVICE_STATUSES = ["active", "inactive", "maintenance"] as const;
+
+/** Columns added to every vehicle read so the register can show its tracker. */
+const VEHICLE_WITH_GPS_SELECT = `
+  SELECT
+    v.*,
+    gd.device_identifier AS gps_imei,
+    gd.device_type AS gps_device_type,
+    gd.device_model AS gps_device_model,
+    gd.status AS gps_device_status
+  FROM vehicles v
+  LEFT JOIN gps_devices gd ON gd.id = v.gps_device_id
+`;
+
 router.get("/", (req, res) => {
   const { status, department } = req.query;
-  let query = "SELECT * FROM vehicles WHERE 1=1";
+  let query = `${VEHICLE_WITH_GPS_SELECT} WHERE 1=1`;
   const params: any[] = [];
   if (status) {
-    query += " AND status = ?";
+    query += " AND v.status = ?";
     params.push(status);
   }
   if (department) {
-    query += " AND department = ?";
+    query += " AND v.department = ?";
     params.push(department);
   }
-  query += " ORDER BY vehicle_number ASC";
+  query += " ORDER BY v.vehicle_number ASC";
   const rows = db.prepare(query).all(...params);
   res.json({ data: rows });
 });
 
 router.get("/:id", (req, res) => {
-  const vehicle = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id);
+  const vehicle = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id);
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
   res.json({ data: vehicle });
 });
@@ -46,7 +62,10 @@ router.get("/:id/intelligence", (req, res, next) => {
         v.*,
         vsv.computed_status,
         fc.card_number,
-        gd.device_identifier
+        gd.device_identifier,
+        gd.device_type AS gps_device_type,
+        gd.device_model AS gps_device_model,
+        gd.status AS gps_device_status
       FROM vehicles v
       LEFT JOIN vehicle_status_view vsv ON vsv.vehicle_id = v.id
       LEFT JOIN fuel_cards fc ON fc.id = v.fuel_card_id
@@ -175,13 +194,99 @@ const vehicleSchema = z.object({
   registrationExpiry: z.string().optional(),
   tankCapacityLitres: z.number().optional(),
   expectedKmPerL: z.number().optional(),
+  gpsImei: z.string().trim().max(64).optional(),
+  gpsDeviceType: z.enum(GPS_DEVICE_TYPES).optional(),
+  gpsDeviceModel: z.enum(GPS_DEVICE_MODELS).optional(),
+  gpsDeviceStatus: z.enum(GPS_DEVICE_STATUSES).optional(),
 });
+
+type GpsDeviceInput = {
+  gpsImei?: string;
+  gpsDeviceType?: (typeof GPS_DEVICE_TYPES)[number];
+  gpsDeviceModel?: (typeof GPS_DEVICE_MODELS)[number];
+  gpsDeviceStatus?: (typeof GPS_DEVICE_STATUSES)[number];
+};
+
+/**
+ * Binds, rebinds, or clears the vehicle's tracker. An empty IMEI unassigns the
+ * current device; an IMEI already registered elsewhere is moved to this vehicle.
+ */
+function syncGpsDevice(vehicleId: string, input: GpsDeviceInput) {
+  if (input.gpsImei === undefined) return;
+
+  const vehicle = db.prepare("SELECT gps_device_id FROM vehicles WHERE id = ?").get(vehicleId) as
+    | { gps_device_id: string | null }
+    | undefined;
+  if (!vehicle) return;
+
+  const previousDeviceId = vehicle.gps_device_id;
+  const imei = input.gpsImei.trim();
+
+  if (!imei) {
+    if (previousDeviceId) {
+      db.prepare("UPDATE gps_devices SET vehicle_id = NULL, updated_at = datetime('now') WHERE id = ?").run(previousDeviceId);
+    }
+    db.prepare("UPDATE vehicles SET gps_device_id = NULL, updated_at = datetime('now') WHERE id = ?").run(vehicleId);
+    return;
+  }
+
+  const existing = db.prepare(`
+    SELECT id, vehicle_id, device_type, device_model, status
+    FROM gps_devices
+    WHERE device_identifier = ?
+  `).get(imei) as
+    | { id: string; vehicle_id: string | null; device_type: string; device_model: string | null; status: string }
+    | undefined;
+
+  let deviceId: string;
+  if (existing) {
+    deviceId = existing.id;
+    if (existing.vehicle_id && existing.vehicle_id !== vehicleId) {
+      db.prepare(`
+        UPDATE vehicles SET gps_device_id = NULL, updated_at = datetime('now')
+        WHERE id = ? AND gps_device_id = ?
+      `).run(existing.vehicle_id, deviceId);
+    }
+    db.prepare(`
+      UPDATE gps_devices
+      SET vehicle_id = ?, device_type = ?, device_model = ?, status = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      vehicleId,
+      input.gpsDeviceType ?? existing.device_type ?? "meshsat",
+      input.gpsDeviceModel ?? existing.device_model ?? "FMB125",
+      input.gpsDeviceStatus ?? existing.status ?? "active",
+      deviceId,
+    );
+  } else {
+    deviceId = uuid();
+    db.prepare(`
+      INSERT INTO gps_devices (id, vehicle_id, device_identifier, device_type, device_model, status)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      deviceId,
+      vehicleId,
+      imei,
+      input.gpsDeviceType ?? "meshsat",
+      input.gpsDeviceModel ?? "FMB125",
+      input.gpsDeviceStatus ?? "active",
+    );
+  }
+
+  if (previousDeviceId && previousDeviceId !== deviceId) {
+    db.prepare("UPDATE gps_devices SET vehicle_id = NULL, updated_at = datetime('now') WHERE id = ?").run(previousDeviceId);
+  }
+  // A vehicle has one active tracker; release any other device that still points at it.
+  db.prepare("UPDATE gps_devices SET vehicle_id = NULL, updated_at = datetime('now') WHERE vehicle_id = ? AND id != ?").run(vehicleId, deviceId);
+  db.prepare("UPDATE vehicles SET gps_device_id = ?, updated_at = datetime('now') WHERE id = ?").run(deviceId, vehicleId);
+}
 
 router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
   try {
     const input = vehicleSchema.parse(req.body);
     const id = uuid();
-    db.prepare(`
+    const createVehicle = db.transaction(() => {
+      db.prepare(`
       INSERT INTO vehicles (
         id, vehicle_number, registration_number, make, model, year, vehicle_type,
         chassis_vin, engine_number, colour, fuel_type, department, location, status,
@@ -217,10 +322,13 @@ router.post("/", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
       registrationExpiry: input.registrationExpiry ?? null,
       tankCapacityLitres: input.tankCapacityLitres ?? 80.0,
       expectedKmPerL: input.expectedKmPerL ?? 8.0,
+      });
+      syncGpsDevice(id, input);
     });
+    createVehicle();
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_CREATED", entity: "vehicles", entityId: id, newValue: input });
-    const created = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(id);
+    const created = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(id);
     res.status(201).json({ data: created });
   } catch (e) { next(e); }
 });
@@ -231,7 +339,8 @@ router.put("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
     const existing = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id) as any;
     if (!existing) return res.status(404).json({ error: "Vehicle not found" });
 
-    db.prepare(`
+    const updateVehicle = db.transaction(() => {
+      db.prepare(`
       UPDATE vehicles SET
         registration_number = COALESCE(@registrationNumber, registration_number),
         make = COALESCE(@make, make),
@@ -279,10 +388,13 @@ router.put("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
       registrationExpiry: input.registrationExpiry ?? null,
       tankCapacityLitres: input.tankCapacityLitres ?? null,
       expectedKmPerL: input.expectedKmPerL ?? null,
+      });
+      syncGpsDevice(req.params.id, input);
     });
+    updateVehicle();
 
     writeAudit({ userId: req.user!.id, action: "VEHICLE_UPDATED", entity: "vehicles", entityId: req.params.id, previousValue: existing, newValue: input });
-    const updated = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id);
+    const updated = db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id);
     res.json({ data: updated });
   } catch (e) { next(e); }
 });
@@ -292,16 +404,24 @@ router.patch("/:id/status", requireRole(...FLEET_WRITE_ROLES), (req, res, next) 
     const { status } = z.object({ status: z.enum(["active", "inactive", "under_repair", "disposed"]) }).parse(req.body);
     db.prepare("UPDATE vehicles SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, req.params.id);
     writeAudit({ userId: req.user!.id, action: "VEHICLE_STATUS_CHANGED", entity: "vehicles", entityId: req.params.id, newValue: { status } });
-    res.json({ data: db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id) });
+    res.json({ data: db.prepare(`${VEHICLE_WITH_GPS_SELECT} WHERE v.id = ?`).get(req.params.id) });
   } catch (e) { next(e); }
 });
 
 router.delete("/:id", requireRole(...FLEET_WRITE_ROLES), (req, res, next) => {
   try {
-    const existing = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id);
+    const existing = db.prepare("SELECT * FROM vehicles WHERE id = ?").get(req.params.id) as any;
     if (!existing) return res.status(404).json({ error: "Vehicle not found" });
 
-    db.prepare("DELETE FROM vehicles WHERE id = ?").run(req.params.id);
+    db.transaction(() => {
+      // Release the tracker before deleting the row it references.
+      db.prepare("UPDATE gps_devices SET vehicle_id = NULL, updated_at = datetime('now') WHERE vehicle_id = ?").run(req.params.id);
+      if (existing.gps_device_id) {
+        db.prepare("UPDATE gps_devices SET vehicle_id = NULL, updated_at = datetime('now') WHERE id = ?").run(existing.gps_device_id);
+      }
+      db.prepare("DELETE FROM vehicles WHERE id = ?").run(req.params.id);
+    })();
+
     writeAudit({ userId: req.user!.id, action: "VEHICLE_DELETED", entity: "vehicles", entityId: req.params.id, previousValue: existing });
     res.status(204).end();
   } catch (e: any) {

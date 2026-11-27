@@ -17,6 +17,10 @@ export default function Vehicles() {
   const [fuelType, setFuelType] = useState("Diesel");
   const [department, setDepartment] = useState("Operations");
   const [location, setLocation] = useState("Port Moresby (POM)");
+  const [gpsImei, setGpsImei] = useState("");
+  const [gpsDeviceType, setGpsDeviceType] = useState<"meshsat" | "teltonika">("meshsat");
+  const [gpsDeviceModel, setGpsDeviceModel] = useState<"FMB125" | "FMC130" | "FMC650" | "FMB920" | "DUALCAM">("FMB125");
+  const [gpsDeviceStatus, setGpsDeviceStatus] = useState<"active" | "inactive" | "maintenance">("active");
 
   const fetchVehicles = () => {
     api.get<{ data: Vehicle[] }>("/vehicles")
@@ -40,6 +44,10 @@ export default function Vehicles() {
     setFuelType("Diesel");
     setDepartment("Operations");
     setLocation("Port Moresby (POM)");
+    setGpsImei("");
+    setGpsDeviceType("meshsat");
+    setGpsDeviceModel("FMB125");
+    setGpsDeviceStatus("active");
   };
 
   const handleOpenCreate = () => {
@@ -58,6 +66,10 @@ export default function Vehicles() {
     setFuelType(v.fuel_type || "Diesel");
     setDepartment(v.department || "");
     setLocation(v.location || "");
+    setGpsImei(v.gps_imei || "");
+    setGpsDeviceType(v.gps_device_type || "meshsat");
+    setGpsDeviceModel(v.gps_device_model || "FMB125");
+    setGpsDeviceStatus(v.gps_device_status || "active");
     setShowModal(true);
   };
 
@@ -79,8 +91,11 @@ export default function Vehicles() {
         fuelType,
         department,
         location,
-        status: "active",
-        ownership: "owned",
+        ...(editingId ? {} : { status: "active", ownership: "owned" }),
+        gpsImei: gpsImei.trim(),
+        gpsDeviceType,
+        gpsDeviceModel,
+        gpsDeviceStatus,
       };
 
       if (editingId) {
@@ -123,6 +138,7 @@ export default function Vehicles() {
             <tr>
               <th className="px-4 py-3">Vehicle #</th>
               <th className="px-4 py-3">Reg #</th>
+              <th className="px-4 py-3">GPS Tracking</th>
               <th className="px-4 py-3">Make & Model</th>
               <th className="px-4 py-3">Type</th>
               <th className="px-4 py-3">Fuel</th>
@@ -137,6 +153,18 @@ export default function Vehicles() {
               <tr key={v.id} className="hover:bg-base-800/50">
                 <td className="px-4 py-3 font-semibold text-amber-400">{v.vehicle_number}</td>
                 <td className="px-4 py-3 font-mono">{v.registration_number}</td>
+                <td className="px-4 py-3">
+                  {v.gps_imei ? (
+                    <div>
+                      <div className="font-mono text-xs text-ink-200">{v.gps_imei}</div>
+                      <div className="text-[10px] text-ink-500">
+                        {[v.gps_device_model, v.gps_device_type, v.gps_device_status].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-ink-500">Not set</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">{v.make} {v.model} ({v.year})</td>
                 <td className="px-4 py-3">{v.vehicle_type}</td>
                 <td className="px-4 py-3">{v.fuel_type}</td>
@@ -160,7 +188,7 @@ export default function Vehicles() {
               </tr>
             ))}
             {(!Array.isArray(vehicles) || vehicles.length === 0) && (
-              <tr><td colSpan={9} className="px-4 py-6 text-center text-ink-500">No vehicles registered yet.</td></tr>
+              <tr><td colSpan={10} className="px-4 py-6 text-center text-ink-500">No vehicles registered yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -168,7 +196,7 @@ export default function Vehicles() {
 
       {showModal && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="panel p-6 max-w-lg w-full space-y-4">
+          <div className="panel p-6 max-w-2xl w-full space-y-4 max-h-[90vh] overflow-y-auto">
             <h2 className="text-lg font-display font-semibold text-ink-100">{editingId ? "Edit Vehicle" : "Register Vehicle"}</h2>
             <form onSubmit={handleSubmit} className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
@@ -209,6 +237,63 @@ export default function Vehicles() {
                 <div>
                   <label className="label">Location</label>
                   <input className="input" value={location} onChange={(e) => setLocation(e.target.value)} />
+                </div>
+              </div>
+              <div className="border-t border-base-700 pt-4 space-y-3">
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-ink-300">GPS Tracking</h3>
+                  <p className="text-[10px] text-ink-500 mt-1">
+                    Bind this vehicle to its tracker. The IMEI must match the identifier used by telemetry ingest.
+                    Leave it blank to unassign the current device.
+                  </p>
+                </div>
+                <div>
+                  <label className="label">GPS IMEI / Device ID</label>
+                  <input
+                    className="input font-mono"
+                    value={gpsImei}
+                    onChange={(e) => setGpsImei(e.target.value)}
+                    placeholder="354018111234567"
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="label">Device Type</label>
+                    <select
+                      className="input"
+                      value={gpsDeviceType}
+                      onChange={(e) => setGpsDeviceType(e.target.value as "meshsat" | "teltonika")}
+                    >
+                      <option value="meshsat">MeshSat</option>
+                      <option value="teltonika">Teltonika</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Device Model</label>
+                    <select
+                      className="input"
+                      value={gpsDeviceModel}
+                      onChange={(e) => setGpsDeviceModel(e.target.value as "FMB125" | "FMC130" | "FMC650" | "FMB920" | "DUALCAM")}
+                    >
+                      <option value="FMB125">FMB125</option>
+                      <option value="FMC130">FMC130</option>
+                      <option value="FMC650">FMC650</option>
+                      <option value="FMB920">FMB920</option>
+                      <option value="DUALCAM">DUALCAM</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Device Status</label>
+                    <select
+                      className="input"
+                      value={gpsDeviceStatus}
+                      onChange={(e) => setGpsDeviceStatus(e.target.value as "active" | "inactive" | "maintenance")}
+                    >
+                      <option value="active">Active</option>
+                      <option value="inactive">Inactive</option>
+                      <option value="maintenance">Maintenance</option>
+                    </select>
+                  </div>
                 </div>
               </div>
               <div className="flex justify-end gap-3 pt-3">
