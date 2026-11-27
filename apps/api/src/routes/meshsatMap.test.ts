@@ -130,11 +130,11 @@ describe("MeshSat map proxy", () => {
     expect(body).toContain("url(/api/meshsat-map/bg.png)");
   });
 
-  it("leaves third-party absolute URLs untouched and rewrites MeshSat-relative ones", async () => {
+  it("proxies Leaflet assets and leaves other third-party URLs untouched", async () => {
     const html =
       '<!doctype html><html><head>' +
       '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>' +
-      '<link href="//unpkg.com/leaflet.css">' +
+      '<link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">' +
       "</head><body>" +
       '<img src="https://tile.openstreetmap.org/3/4/5.png">' +
       '<img src="//tile.openstreetmap.org/3/4/5.png">' +
@@ -152,9 +152,12 @@ describe("MeshSat map proxy", () => {
     const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
     const body = await res.text();
 
-    // External origins (OSM tiles, unpkg assets) are fetched directly by the browser.
-    expect(body).toContain('src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"');
-    expect(body).toContain('href="//unpkg.com/leaflet.css"');
+    // Leaflet is served same-origin so a blocked CDN cannot break the map.
+    expect(body).toContain('src="/api/meshsat-map/vendor/leaflet/leaflet.js"');
+    expect(body).toContain('href="/api/meshsat-map/vendor/leaflet/leaflet.css"');
+    expect(body).not.toContain("unpkg.com/leaflet@1.9.4");
+
+    // Other external origins (OSM tiles, non-Leaflet unpkg assets) are fetched directly.
     expect(body).toContain('src="https://tile.openstreetmap.org/3/4/5.png"');
     expect(body).toContain('src="//tile.openstreetmap.org/3/4/5.png"');
     expect(body).toContain('fetch("//tile.openstreetmap.org/3/4/5.png")');
@@ -225,6 +228,49 @@ describe("MeshSat map proxy", () => {
     expect(res.headers.get("set-cookie") || "").toContain("fms_map_token=");
     expect(calls).toHaveLength(0);
   });
+
+  it("serves Leaflet assets through the proxy", async () => {
+    const realFetch = global.fetch;
+    global.fetch = vi.fn((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js")) {
+        return Promise.resolve(
+          new Response("/* leaflet */", { status: 200, headers: { "content-type": "application/javascript" } }),
+        );
+      }
+      return realFetch(input, init);
+    }) as unknown as typeof fetch;
+
+    const res = await fetch(`${baseUrl}/vendor/leaflet/leaflet.js`, {
+      headers: { Authorization: `Bearer ${fmsToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("javascript");
+    expect(res.headers.get("cache-control")).toContain("max-age=86400");
+    expect(await res.text()).toContain("leaflet");
+  });
+
+  it("rejects unknown Leaflet asset paths", async () => {
+    const res = await fetch(`${baseUrl}/vendor/leaflet/evil.js`, {
+      headers: { Authorization: `Bearer ${fmsToken}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("requires auth for Leaflet assets", async () => {
+    const res = await fetch(`${baseUrl}/vendor/leaflet/leaflet.js`);
+    expect(res.status).toBe(401);
+  });
+
+  it("marks proxied map HTML as no-store", async () => {
+    mockUpstream(
+      () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+      [],
+    );
+    const res = await fetch(`${baseUrl}/map`, { headers: { Authorization: `Bearer ${fmsToken}` } });
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
 
   it("does not forward an upstream Set-Cookie onto the FMS origin", async () => {
     const calls: UpstreamCall[] = [];
