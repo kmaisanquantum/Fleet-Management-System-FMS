@@ -28,6 +28,13 @@ const NAV_GROUPS: {
     ],
   },
   {
+    title: "Reporting & Alerts",
+    items: [
+      { to: "/reports", label: "Fleet Reports" },
+      { to: "/alerts-settings", label: "Alerts & Email Rules", adminOnly: true },
+    ],
+  },
+  {
     title: "Operations & Register",
     items: [
       { to: "/vehicles", label: "Vehicles Register" },
