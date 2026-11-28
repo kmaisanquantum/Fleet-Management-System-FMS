@@ -17,6 +17,25 @@ services:
       # Shared secret for machine-to-machine telemetry ingest (x-api-key). Must match
       # the FMS_API_KEY used by the meshsat-relay / teltonika-relay services.
       TELEMETRY_API_KEY: ${TELEMETRY_API_KEY}
+      # Bearer token for the rich FMB125 ingest path and /commands/ack callback.
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN:-}
+      DEVICE_OFFLINE_MINUTES: ${DEVICE_OFFLINE_MINUTES:-15}
+      FUEL_REFUEL_MIN_L: ${FUEL_REFUEL_MIN_L:-5}
+      FUEL_DRAIN_MIN_L: ${FUEL_DRAIN_MIN_L:-5}
+      # Remote FMB125 configuration/control bridge (api -> MeshSat).
+      MESHSAT_API_URL: ${MESHSAT_API_URL:-https://meshsat.dspng.space}
+      MESHSAT_API_KEY: ${MESHSAT_API_KEY:-}
+      MESHSAT_CMD_URL: ${MESHSAT_CMD_URL:-}
+      MESHSAT_CMD_TOKEN: ${MESHSAT_CMD_TOKEN:-}
+      MESHSAT_BRIDGE_URL: ${MESHSAT_BRIDGE_URL:-}
+      MESHSAT_BRIDGE_TOKEN: ${MESHSAT_BRIDGE_TOKEN:-}
+      MESHSAT_TIMEOUT_MS: ${MESHSAT_TIMEOUT_MS:-5000}
+      # Server-side Basic-auth proxy for the MeshSat map.
+      MESHSAT_MAP_ORIGIN: ${MESHSAT_MAP_ORIGIN:-https://meshsat.dspng.space}
+      MESHSAT_MAP_AUTH: ${MESHSAT_MAP_AUTH:-}
+      MESHSAT_MAP_TOKEN: ${MESHSAT_MAP_TOKEN:-}
+      MESHSAT_MAP_TILE_URL: ${MESHSAT_MAP_TILE_URL:-}
+      MESHSAT_MAP_TILE_ATTRIBUTION: ${MESHSAT_MAP_TILE_ATTRIBUTION:-}
       # Real-time alert + scheduled report delivery. Defaults route to fleet@dspng.tech.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -77,6 +96,7 @@ services:
       PORT: 6055
       FMS_URL: http://api:4000
       FMS_API_KEY: ${TELEMETRY_API_KEY}
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN:-}
     depends_on:
       - api
 

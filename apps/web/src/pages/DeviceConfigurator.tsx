@@ -48,6 +48,28 @@ function stateMap(config: DeviceConfig | null) {
   return map;
 }
 
+/** MeshSat's bridge inventory is the authoritative online state for trackers. */
+function bridgeOnlineByImei(payload: unknown): Map<string, boolean> {
+  const root = payload as any;
+  const rows = Array.isArray(root)
+    ? root
+    : Array.isArray(root?.data)
+      ? root.data
+      : Array.isArray(root?.devices)
+        ? root.devices
+        : Array.isArray(root?.data?.devices)
+          ? root.data.devices
+          : [];
+  const map = new Map<string, boolean>();
+  for (const row of rows) {
+    const imei = String(row?.imei ?? row?.device_identifier ?? row?.deviceId ?? row?.id ?? "");
+    if (!imei) continue;
+    const online = row?.online ?? row?.connected ?? (typeof row?.status === "string" ? row.status.toLowerCase() === "online" : undefined);
+    if (typeof online === "boolean") map.set(imei, online);
+  }
+  return map;
+}
+
 /** PostgreSQL returns JSONB values as numbers/booleans; form inputs need strings. */
 function asInputValue(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -302,12 +324,18 @@ export default function DeviceConfigurator() {
 
   const loadRegistry = useCallback(async () => {
     try {
-      const [registryRes, devicesRes] = await Promise.all([
+      const [registryRes, devicesRes, bridgeRes] = await Promise.all([
         deviceConfigApi.registry(),
         deviceConfigApi.list().catch(() => ({ data: [] as DeviceSummary[] })),
+        deviceConfigApi.bridgeDevices().catch(() => null),
       ]);
+      const bridgeOnline = bridgeOnlineByImei(bridgeRes?.data);
       setRegistry(registryRes.data);
-      setDevices(devicesRes.data);
+      setDevices(
+        devicesRes.data.map((item) =>
+          bridgeOnline.has(item.imei) ? { ...item, online: bridgeOnline.get(item.imei)! } : item
+        )
+      );
     } catch (err: any) {
       setError(err.message || "Failed to load Teltonika registry");
     }
