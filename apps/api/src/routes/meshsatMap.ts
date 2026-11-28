@@ -273,6 +273,11 @@ export function injectMapClientHardening(html: string): string {
     var img = event.target;
     if (!img || img.tagName !== 'IMG' || !img.classList || !img.classList.contains('leaflet-tile')) return;
     var src = img.getAttribute('src') || '';
+    if (src.indexOf('World_Street_Map') !== -1 && !img.dataset.fmsRetry) {
+      img.dataset.fmsRetry = '1';
+      img.src = src + (src.indexOf('?') === -1 ? '?' : '&') + 'fms_retry=' + Date.now();
+      return;
+    }
     if (src.indexOf('World_Street_Map') !== -1 && !img.dataset.fmsTopo) {
       img.dataset.fmsTopo = '1';
       img.src = src.replace('/World_Street_Map/', '/World_Topo_Map/');
@@ -280,11 +285,19 @@ export function injectMapClientHardening(html: string): string {
     }
     if (src.indexOf('arcgisonline.com') !== -1 && !img.dataset.fmsOsm) {
       img.dataset.fmsOsm = '1';
-      var m = src.match(/\\/tile\\/(\\d+)\\/(\\d+)\\/(\\d+)$/);
+      var m = src.match(/\\/tile\\/(\\d+)\\/(\\d+)\\/(\\d+)(?:\\?|$)/);
       if (m) { img.src = 'https://tile.openstreetmap.org/' + m[1] + '/' + m[3] + '/' + m[2] + '.png'; return; }
     }
+    if (img.dataset.fmsNotified) return;
+    img.dataset.fmsNotified = '1';
     img.classList.add('fms-tile-failed');
     try { window.parent.postMessage({ type: 'fms-map-tile-error' }, location.origin); } catch (e) {}
+  }, true);
+  document.addEventListener('load', function (event) {
+    var img = event.target;
+    if (!img || img.tagName !== 'IMG' || !img.classList || !img.classList.contains('leaflet-tile')) return;
+    if (img.classList.contains('fms-tile-failed')) return;
+    try { window.parent.postMessage({ type: 'fms-map-tile-ok' }, location.origin); } catch (e) {}
   }, true);
   window.addEventListener('load', function () {
     try { window.parent.postMessage({ type: 'fms-map-ready' }, location.origin); } catch (e) {}

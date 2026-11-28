@@ -65,7 +65,7 @@ function MapFocus({
   return null;
 }
 
-export default function FleetLiveMap() {
+export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty: boolean) => void }) {
   const [vehicles, setVehicles] = useState<TelemetryLatest[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -92,6 +92,11 @@ export default function FleetLiveMap() {
     const interval = window.setInterval(() => void load(), 15_000);
     return () => window.clearInterval(interval);
   }, [load]);
+
+  useEffect(() => {
+    const hasPosition = vehicles.some((vehicle) => vehicle.lat !== null && vehicle.lon !== null);
+    if (!loading && !hasPosition) onEmptyChange?.(true);
+  }, [loading, vehicles, onEmptyChange]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -241,6 +246,12 @@ export default function FleetLiveMap() {
                       <div>Ignition: {vehicle.ignition === 1 ? "ON" : "OFF"}</div>
                       <div>Last seen: {fmtTime(vehicle.last_seen_at)}</div>
                       <div className="flex gap-2 pt-1">
+                        <Link
+                          to={`/vehicles/${encodeURIComponent(vehicle.vehicle_id)}`}
+                          className="text-amber-400 hover:text-amber-300"
+                        >
+                          Vehicle
+                        </Link>
                         {vehicle.imei && (
                           <Link
                             to={`/telemetry/device/${encodeURIComponent(vehicle.imei)}`}
@@ -251,7 +262,7 @@ export default function FleetLiveMap() {
                         )}
                         {vehicle.imei && (
                           <Link
-                            to={`/telemetry/device/${encodeURIComponent(vehicle.imei)}/configurator`}
+                            to={`/device-configurator/${encodeURIComponent(vehicle.imei)}`}
                             className="text-amber-400 hover:text-amber-300"
                           >
                             Configure
@@ -265,13 +276,13 @@ export default function FleetLiveMap() {
             })}
           </MapContainer>
 
-          {!loading && located.length === 0 && (
+          {!loading && !error && located.length === 0 && (
             <div className="absolute inset-0 z-[500] flex items-center justify-center bg-base-950/70">
               <div className="panel p-4 max-w-sm text-center">
-                <div className="text-sm font-semibold text-ink-100">No live positions to plot</div>
+                <div className="text-sm font-semibold text-ink-100">Waiting for GPS positions</div>
                 <p className="text-xs text-ink-500 mt-1">
                   {vehicles.length === 0
-                    ? "No telemetry has been received for the vehicles you can access."
+                    ? "No vehicle has reported a position yet. The map updates automatically."
                     : "The matching vehicles have no GPS fix yet. Clear the filter or wait for the next tracker report."}
                 </p>
               </div>

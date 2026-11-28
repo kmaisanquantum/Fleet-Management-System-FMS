@@ -459,7 +459,7 @@ export default function DeviceTelemetry() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
-            to={`/telemetry/device/${encodeURIComponent(device.imei)}/configurator`}
+            to={`/device-configurator/${encodeURIComponent(device.imei)}`}
             className="btn-primary text-xs px-3 py-2"
           >
             Open Configurator Workspace

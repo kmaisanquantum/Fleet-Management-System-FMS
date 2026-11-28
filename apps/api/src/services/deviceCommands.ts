@@ -1,7 +1,14 @@
 import { v4 as uuid } from "uuid";
 import { db } from "../db";
 import { isDeviceOnline, nowSql } from "../utils/deviceStatus";
-import { applyConfigAck, ConfigStatus, ConfigValue, parseTrackerReply, upsertConfigState } from "./deviceConfig";
+import {
+  applyConfigAck,
+  ConfigStatus,
+  ConfigValue,
+  parseTrackerReply,
+  recordDeviceInfoReply,
+  upsertConfigState,
+} from "./deviceConfig";
 
 /** Roles permitted to dispatch device commands (client-role users are excluded). */
 export const COMMAND_ROLES = ["admin", "fleet_manager"];
@@ -151,6 +158,26 @@ export function latestSpeedKmh(vehicleId: string): number | null {
 export function normalizeCommandStatus(status: string | null | undefined): string {
   if (status === "acknowledged" || status === "acked") return "applied";
   return status || "queued";
+}
+
+const IDENTITY_REPLY_COMMANDS = new Set(["getinfo", "getgps", "getver", "getstatus", "getio", "readio"]);
+
+/** Returns the tracker reply kind for a stored command payload. */
+export function diagnosticReplyKind(payload: Record<string, unknown> | null | undefined): string | null {
+  if (!payload) return null;
+  if (payload.type === "diagnostic" || payload.type === "raw") {
+    const command = String(payload.command ?? "").trim();
+    return command || null;
+  }
+  if (payload.type === "getparam") return "getparam";
+  return null;
+}
+
+function recordIdentityReply(imei: string, payload: Record<string, unknown> | null, reply: string | null): void {
+  const kind = diagnosticReplyKind(payload);
+  if (kind && IDENTITY_REPLY_COMMANDS.has(kind) && reply) {
+    recordDeviceInfoReply(imei, kind, reply);
+  }
 }
 
 /** Audit action for a dispatched command (immobilizer actions are distinct). */
@@ -467,6 +494,7 @@ export async function dispatchDeviceCommand(input: DispatchInput): Promise<Dispa
         : `Command endpoint returned HTTP ${result.status}`;
 
   updateCommand(id, status, sentAt, finalText, ackedAt);
+  if (result.ok) recordIdentityReply(input.imei, input.payload, responseText);
 
   if (input.configState && configStatus !== "pending") {
     persistConfigState(input, configStatus as ConfigStatus, finalText, id);
@@ -521,6 +549,7 @@ export async function flushQueuedCommandsForImei(imei: string): Promise<number> 
         const sentAt = nowSql();
         const ackedAt = status === "applied" ? sentAt : null;
         updateCommand(row.id, status, sentAt, responseText, ackedAt);
+        recordIdentityReply(imei, payload, responseText);
         if (reply.status === "applied" || reply.status === "failed") {
           applyConfigAck(row, responseText);
         }

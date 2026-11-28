@@ -414,11 +414,24 @@ describe("Remote device configuration router", () => {
     );
     expect(status).toBe(201);
     expect(body.data.param_ids).toEqual([11100, 11104]);
-    expect(body.data.commands).toHaveLength(6);
+    expect(body.data.commands).toHaveLength(7);
     const sent = gateway.mock.calls.map((c) => JSON.parse((c[1] as any).body).command);
     expect(sent).toEqual(
-      expect.arrayContaining(["getinfo", "getver", "getstatus", "getio", "getparam 11100", "getparam 11104"])
+      expect.arrayContaining(["getinfo", "getver", "getstatus", "getio", "getgps", "getparam 11100", "getparam 11104"])
     );
+  });
+
+  it("records identity replies returned directly by the bridge", async () => {
+    stubGateway(() =>
+      fakeResponse(true, 200, JSON.stringify({ status: "applied", value: "RTC:2026/11/28 00:00:00;Uptime:12345" }))
+    );
+    const issued = await post(`/api/devices/${imei}/command`, { type: "getinfo" }, adminToken);
+    expect(issued.status).toBe(201);
+
+    const { status, body } = await get(`/api/devices/${imei}/config`, adminToken);
+    expect(status).toBe(200);
+    expect(body.data.device_info.getinfo).toBeTruthy();
+    expect(JSON.stringify(body.data.device_info.getinfo)).toContain("Uptime");
   });
 
   it("requires explicit confirmation before queuing cpureset", async () => {
