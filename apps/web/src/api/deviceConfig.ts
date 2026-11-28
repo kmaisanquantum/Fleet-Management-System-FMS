@@ -1,4 +1,4 @@
-import { apiGet, apiPost, getToken } from "./client";
+import { apiGet, apiGetOptional, apiPost, getToken } from "./client";
 import type { DeviceCommand } from "./telemetry";
 
 export type DeviceConfigValue = string | number | boolean;
@@ -206,7 +206,7 @@ export interface BulkConfigResult {
 export const deviceConfigApi = {
   list: () => apiGet<{ data: DeviceSummary[] }>("/devices"),
   registry: () => apiGet<{ data: TeltonikaRegistry }>("/devices/registry"),
-  bridgeDevices: () => apiGet<{ data: unknown }>("/devices/bridge"),
+  bridgeDevices: () => apiGetOptional<{ data: unknown }>("/devices/bridge"),
   get: (imei: string) => apiGet<{ data: DeviceConfig }>(`/devices/${encodeURIComponent(imei)}/config`),
   update: (imei: string, body: DeviceConfigUpdate) =>
     apiPost<{ data: { commands: DeviceCommand[]; results: DeviceConfigResult[] }; message: string }>(

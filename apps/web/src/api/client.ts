@@ -90,7 +90,7 @@ export class ApiClientError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}, retried = false): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, retried = false, logoutOnAuthFailure = true): Promise<T> {
   const canRefresh = !path.startsWith("/auth/login") && !path.startsWith("/auth/refresh");
   let token = getToken();
 
@@ -114,10 +114,12 @@ async function request<T>(path: string, options: RequestInit = {}, retried = fal
   if (res.status === 401 && canRefresh) {
     if (!retried) {
       const refreshed = await refreshAccessToken();
-      if (refreshed) return request<T>(path, options, true);
+      if (refreshed) return request<T>(path, options, true, logoutOnAuthFailure);
     }
-    sessionStorage.setItem("fms_logout_reason", "expired");
-    setToken(null);
+    if (logoutOnAuthFailure) {
+      sessionStorage.setItem("fms_logout_reason", "expired");
+      setToken(null);
+    }
   }
 
   if (!res.ok) {
@@ -130,6 +132,8 @@ async function request<T>(path: string, options: RequestInit = {}, retried = fal
 
 export const api = {
   get: <T,>(path: string) => request<T>(path, { method: "GET" }),
+  /** Best-effort GET: a 401 is reported to the caller but never clears the session. */
+  getOptional: <T,>(path: string) => request<T>(path, { method: "GET" }, false, false),
   post: <T,>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   put: <T,>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T,>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
@@ -137,6 +141,7 @@ export const api = {
 };
 
 export const apiGet = api.get;
+export const apiGetOptional = api.getOptional;
 export const apiPost = api.post;
 export const apiPut = api.put;
 export const apiPatch = api.patch;
