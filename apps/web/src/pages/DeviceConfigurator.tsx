@@ -11,6 +11,7 @@ import {
 } from "../api/deviceConfig";
 import { telemetryApi, DeviceCommand, DeviceFeatures } from "../api/telemetry";
 import { useAuth } from "../context/AuthContext";
+import StatusPanel from "../components/configurator/StatusPanel";
 
 const COMMAND_ROLES = new Set(["admin", "fleet_manager"]);
 const PROFILE_SCHEMA = "fms.teltonika.profile.v1";
@@ -29,6 +30,7 @@ const CONFIG_STATUS_STYLES: Record<string, string> = {
   pending: "bg-amber-400/15 text-amber-400",
   applied: "bg-emerald-500/15 text-emerald-400",
   failed: "bg-signal-red/15 text-signal-red",
+  default: "bg-base-600 text-ink-300",
   unknown: "bg-base-600 text-ink-300",
 };
 
@@ -95,6 +97,7 @@ function FieldControl({
   stateStatus,
   desiredValue,
   disabled,
+  pills = false,
   onChange,
 }: {
   field: TeltonikaField;
@@ -103,10 +106,20 @@ function FieldControl({
   stateStatus: string | undefined;
   desiredValue: string | null | undefined;
   disabled: boolean;
+  pills?: boolean;
   onChange: (value: string) => void;
 }) {
   const dirty = value !== initialValue;
+  const statusKey = stateStatus ?? (value ? "default" : "unknown");
   const common = "input text-xs w-full bg-base-900 border-base-700 text-ink-100 disabled:opacity-60";
+  const options =
+    field.options ??
+    (field.type === "boolean"
+      ? [
+          { value: "0", label: "Disable" },
+          { value: "1", label: "Enable" },
+        ]
+      : []);
   return (
     <div className={`min-w-0 space-y-1 ${field.dangerous ? "rounded-md border border-amber-400/20 bg-amber-400/[0.03] p-2" : ""}`}>
       <div className="flex items-center justify-between gap-2">
@@ -115,22 +128,43 @@ function FieldControl({
         </label>
         <div className="flex items-center gap-1 shrink-0">
           {dirty && <span className="pill bg-amber-400/15 text-amber-400">modified</span>}
-          <span className={`pill ${CONFIG_STATUS_STYLES[stateStatus ?? "unknown"]}`}>{stateStatus ?? "not loaded"}</span>
+          <span className={`pill ${CONFIG_STATUS_STYLES[statusKey]}`}>{stateStatus ?? (value ? "default" : "not loaded")}</span>
         </div>
       </div>
 
       {field.type === "select" || field.type === "boolean" ? (
-        <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} className={common}>
-          <option value="">— not loaded —</option>
-          {(field.options ?? [
-            { value: "0", label: "Disable" },
-            { value: "1", label: "Enable" },
-          ]).map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        pills && options.length > 0 ? (
+          <div className="flex flex-wrap gap-1" role="group" aria-label={field.label}>
+            {options.map((option) => {
+              const selected = value === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => onChange(option.value)}
+                  disabled={disabled}
+                  aria-pressed={selected}
+                  className={`px-2 py-1 rounded-md border text-[10px] font-medium transition-colors disabled:opacity-50 ${
+                    selected
+                      ? "border-amber-400/60 bg-amber-400/15 text-amber-300"
+                      : "border-base-700 bg-base-900 text-ink-400 hover:border-base-600 hover:text-ink-100"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} className={common}>
+            <option value="">— not loaded —</option>
+            {options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        )
       ) : (
         <div className="relative">
           <input
@@ -198,6 +232,7 @@ function FeatureCard({
             stateStatus={states.get(field.paramId)?.status}
             desiredValue={states.get(field.paramId)?.desired_value}
             disabled={disabled}
+            pills
             onChange={(value) => onChange(field.id, value)}
           />
         ))}
@@ -218,7 +253,7 @@ export default function DeviceConfigurator() {
   const [config, setConfig] = useState<DeviceConfig | null>(null);
   const [device, setDevice] = useState<DeviceFeatures | null>(null);
   const [commands, setCommands] = useState<DeviceCommand[]>([]);
-  const [activeSection, setActiveSection] = useState("features");
+  const [activeSection, setActiveSection] = useState("status");
   const [form, setForm] = useState<Record<string, string>>({});
   const [initial, setInitial] = useState<Record<string, string>>({});
   const initialRef = useRef<Record<string, string>>({});
@@ -234,7 +269,6 @@ export default function DeviceConfigurator() {
   const [rawParamId, setRawParamId] = useState("");
   const [rawValue, setRawValue] = useState("");
   const [rawRead, setRawRead] = useState("");
-  const [latestRecord, setLatestRecord] = useState<Record<string, unknown> | null>(null);
   const [showHistory, setShowHistory] = useState(true);
   const [streamState, setStreamState] = useState<"connecting" | "live" | "polling">("polling");
   const [importMessage, setImportMessage] = useState<string | null>(null);
@@ -252,8 +286,19 @@ export default function DeviceConfigurator() {
     () => registry?.sections.find((section) => section.key === activeSection) ?? registry?.sections[0],
     [registry, activeSection]
   );
-  const currentDevice = devices.find((item) => item.imei === routeImei);
+  const orderedDevices = [...devices].sort(
+    (a, b) =>
+      Number(b.online) - Number(a.online) ||
+      (b.last_seen_at ?? "").localeCompare(a.last_seen_at ?? "")
+  );
+  const fmbDevices = orderedDevices.filter((item) => !item.device_model || /FMB125/i.test(item.device_model));
+  const boundDevices = fmbDevices.filter((item) => item.vehicle_id);
+  const selectableDevices = boundDevices.length > 0 ? boundDevices : fmbDevices.length > 0 ? fmbDevices : orderedDevices;
+  const selectedImei = routeImei ?? selectableDevices[0]?.imei ?? "";
+  const currentDevice = devices.find((item) => item.imei === selectedImei);
   const online = config?.online ?? device?.online ?? currentDevice?.online ?? false;
+  const modelName = config?.device_model ?? registry?.model ?? "FMB125";
+  const firmwareVersion = config?.firmware_version ?? currentDevice?.firmware_version ?? "—";
 
   const loadRegistry = useCallback(async () => {
     try {
@@ -269,12 +314,12 @@ export default function DeviceConfigurator() {
   }, []);
 
   const loadDevice = useCallback(async () => {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     try {
       const [configRes, featuresRes, commandsRes] = await Promise.all([
-        deviceConfigApi.get(routeImei),
-        telemetryApi.features(routeImei).catch(() => null),
-        telemetryApi.commands.list(routeImei).catch(() => ({ data: [] as DeviceCommand[] })),
+        deviceConfigApi.get(selectedImei),
+        telemetryApi.features(selectedImei).catch(() => null),
+        telemetryApi.commands.list(selectedImei).catch(() => ({ data: [] as DeviceCommand[] })),
       ]);
       const nextConfig = configRes.data;
       setConfig(nextConfig);
@@ -301,7 +346,7 @@ export default function DeviceConfigurator() {
     } finally {
       setLoading(false);
     }
-  }, [routeImei, registry, allFields]);
+  }, [selectedImei, registry, allFields]);
 
   useEffect(() => {
     loadRegistry();
@@ -315,12 +360,12 @@ export default function DeviceConfigurator() {
   }, [loadDevice, registry]);
 
   useEffect(() => {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     const controller = new AbortController();
     let active = true;
     setStreamState("connecting");
     deviceConfigApi
-      .stream(routeImei, controller.signal, () => {
+      .stream(selectedImei, controller.signal, () => {
         if (!active) return;
         setStreamState("live");
         loadDevice();
@@ -332,7 +377,7 @@ export default function DeviceConfigurator() {
       active = false;
       controller.abort();
     };
-  }, [routeImei, loadDevice]);
+  }, [selectedImei, loadDevice]);
 
   function setField(fieldId: string, value: string) {
     setForm((current) => ({ ...current, [fieldId]: value }));
@@ -355,9 +400,9 @@ export default function DeviceConfigurator() {
   }
 
   async function loadFromDevice() {
-    if (!routeImei || !registry) return;
+    if (!selectedImei || !registry) return;
     await run("load", async () => {
-      const res = await deviceConfigApi.load(routeImei, {
+      const res = await deviceConfigApi.load(selectedImei, {
         param_ids: registry.load_param_ids,
         reason: reason.trim() || "Configurator load from device",
       });
@@ -366,7 +411,7 @@ export default function DeviceConfigurator() {
   }
 
   async function saveToDevice() {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     const dirty = dirtyFields.filter((field) => (form[field.id] ?? "").trim() !== "");
     if (dirty.length === 0) {
       setNotice("No modified fields to save.");
@@ -384,7 +429,7 @@ export default function DeviceConfigurator() {
     for (const field of dirty) byParam.set(field.paramId, coerceValue(field, form[field.id] ?? ""));
 
     await run("save", async () => {
-      const res = await deviceConfigApi.update(routeImei, {
+      const res = await deviceConfigApi.update(selectedImei, {
         parameters: [...byParam.entries()].map(([param_id, value]) => ({ param_id, value })),
         reason: reason.trim() || "Configurator save to device",
       });
@@ -393,20 +438,19 @@ export default function DeviceConfigurator() {
   }
 
   async function readRecords() {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     await run("records", async () => {
-      const res = await deviceConfigApi.readRecords(routeImei, {
+      const res = await deviceConfigApi.readRecords(selectedImei, {
         reason: reason.trim() || "Configurator read records",
       });
-      setLatestRecord(res.data.latest_record);
       return res.message;
     });
   }
 
   async function rebootDevice() {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     await run("reboot", async () => {
-      const res = await deviceConfigApi.reboot(routeImei, {
+      const res = await deviceConfigApi.reboot(selectedImei, {
         confirm: true,
         reason: rebootReason.trim() || "Remote reboot requested from Configurator",
       });
@@ -416,15 +460,26 @@ export default function DeviceConfigurator() {
     });
   }
 
+  async function runDiagnostic(command: "getinfo" | "getgps" | "getver" | "getstatus" | "getio") {
+    if (!selectedImei) return;
+    await run(command, async () => {
+      const res = await deviceConfigApi.command(selectedImei, {
+        type: command,
+        reason: reason.trim() || `Configurator diagnostic ${command}`,
+      });
+      return `${command}: ${res.data.response_text ?? "queued for the next tracker session"}`;
+    });
+  }
+
   async function advancedRead() {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     const paramId = Number(rawRead);
     if (!Number.isInteger(paramId) || paramId <= 0) {
       setError("Enter a positive parameter ID to read.");
       return;
     }
     await run("advanced-read", async () => {
-      const res = await deviceConfigApi.update(routeImei, {
+      const res = await deviceConfigApi.update(selectedImei, {
         read: [paramId],
         reason: reason.trim() || "Advanced getparam",
       });
@@ -433,7 +488,7 @@ export default function DeviceConfigurator() {
   }
 
   async function advancedWrite() {
-    if (!routeImei) return;
+    if (!selectedImei) return;
     const paramId = Number(rawParamId);
     if (!Number.isInteger(paramId) || paramId <= 0) {
       setError("Enter a positive parameter ID to write.");
@@ -446,7 +501,7 @@ export default function DeviceConfigurator() {
     const numeric = Number(rawValue);
     const value: DeviceConfigValue = Number.isFinite(numeric) && rawValue.trim() !== "" ? numeric : rawValue;
     await run("advanced-write", async () => {
-      const res = await deviceConfigApi.update(routeImei, {
+      const res = await deviceConfigApi.update(selectedImei, {
         parameters: [{ param_id: paramId, value }],
         reason: reason.trim() || "Advanced setparam",
       });
@@ -455,7 +510,7 @@ export default function DeviceConfigurator() {
   }
 
   function saveToFile() {
-    if (!routeImei || !registry) return;
+    if (!selectedImei || !registry) return;
     const values = allFields
       .filter((field) => (form[field.id] ?? "").trim() !== "")
       .map((field) => ({
@@ -468,7 +523,7 @@ export default function DeviceConfigurator() {
     const profile = {
       schema: PROFILE_SCHEMA,
       model: registry.model,
-      imei: routeImei,
+      imei: selectedImei,
       exported_at: new Date().toISOString(),
       firmware_version: config?.firmware_version ?? null,
       config_version: config?.config_version ?? null,
@@ -478,7 +533,7 @@ export default function DeviceConfigurator() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `teltonika-${routeImei}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `teltonika-${selectedImei}-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -530,8 +585,13 @@ export default function DeviceConfigurator() {
     return <div className="p-8 text-ink-400">Loading Teltonika Configurator…</div>;
   }
 
-  if (!routeImei) {
-    return <div className="p-8 text-ink-400">Choose a device IMEI from the vehicle telemetry page.</div>;
+  if (!selectedImei) {
+    return (
+      <div className="panel p-8 text-center space-y-2">
+        <h1 className="text-lg font-bold text-ink-100">No FMB125 devices registered</h1>
+        <p className="text-sm text-ink-400">Register a tracker IMEI from Vehicles Register, then return to this workspace.</p>
+      </div>
+    );
   }
 
   return (
@@ -539,10 +599,10 @@ export default function DeviceConfigurator() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-widest text-amber-400/80 font-semibold">Remote Device Configuration</div>
-          <h1 className="text-2xl font-bold text-ink-100">Teltonika Configurator</h1>
+          <h1 className="text-2xl font-bold text-ink-100">FMB125 Remote Configurator</h1>
         </div>
         <div className="flex items-center gap-2">
-          <Link to={`/telemetry/device/${encodeURIComponent(routeImei)}`} className="btn-secondary text-xs px-3 py-2">
+          <Link to={`/telemetry/device/${encodeURIComponent(selectedImei)}`} className="btn-secondary text-xs px-3 py-2">
             Device Telemetry
           </Link>
           <Link to="/telemetry" className="btn-secondary text-xs px-3 py-2">
@@ -552,23 +612,22 @@ export default function DeviceConfigurator() {
       </div>
 
       <div className="panel p-4 space-y-4">
-        <div className="flex flex-col 2xl:flex-row 2xl:items-start justify-between gap-4">
+        <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4">
           <div className="min-w-0 space-y-2">
+            <div className="text-[10px] uppercase tracking-widest text-ink-500">Device / IMEI</div>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-mono px-2 py-1 rounded bg-amber-400/15 text-amber-400 font-semibold">
-                {config?.device_model ?? registry?.model ?? "FMB125"}
-              </span>
               <select
-                value={routeImei}
-                onChange={(e) => navigate(`/telemetry/device/${encodeURIComponent(e.target.value)}/configurator`)}
-                className="input text-xs font-mono w-auto min-w-[15rem] max-w-full bg-base-900 border-base-700 text-ink-100"
+                value={selectedImei}
+                onChange={(e) => navigate(`/device-configurator/${encodeURIComponent(e.target.value)}`)}
+                className="input text-xs font-mono w-auto min-w-[18rem] max-w-full bg-base-900 border-base-700 text-ink-100"
                 aria-label="Select device IMEI"
               >
-                {!currentDevice && <option value={routeImei}>{routeImei}</option>}
-                {devices.map((item) => (
+                {!currentDevice && <option value={selectedImei}>{selectedImei}</option>}
+                {selectableDevices.map((item) => (
                   <option key={item.imei} value={item.imei}>
                     {item.vehicle_number ? `${item.vehicle_number} · ` : ""}
-                    {item.imei}
+                    {item.imei} · {item.online ? "Online" : "Offline"}
+                    {!item.vehicle_id ? " · Unbound" : ""}
                   </option>
                 ))}
               </select>
@@ -580,15 +639,16 @@ export default function DeviceConfigurator() {
                 Last seen {fmtDate(config?.device_last_seen_at ?? currentDevice?.last_seen_at)}
               </span>
             </div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold text-ink-100">
+              <span>{modelName}</span>
+              <span className="text-ink-600">•</span>
+              <span className="font-mono">{selectedImei}</span>
+              <span className="text-ink-600">•</span>
+              <span className="font-mono">FW {firmwareVersion}</span>
+            </div>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-ink-400">
               <span>
-                IMEI <span className="font-mono text-ink-200">{routeImei}</span>
-              </span>
-              <span>
                 Vehicle <span className="text-ink-200">{config?.vehicle_number ?? currentDevice?.vehicle_number ?? "—"}</span>
-              </span>
-              <span>
-                Firmware <span className="font-mono text-ink-200">{config?.firmware_version ?? currentDevice?.firmware_version ?? "—"}</span>
               </span>
               <span>
                 Configuration <span className="font-mono text-ink-200">{config?.config_version ?? "—"}</span>
@@ -606,46 +666,50 @@ export default function DeviceConfigurator() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-2 min-w-0">
-            <div className="flex flex-wrap gap-2">
-              <button onClick={loadFromDevice} disabled={!canCommand || busy !== null} className="btn-secondary text-xs px-3 py-2">
-                {busy === "load" ? "Loading…" : "Load from device"}
-              </button>
-              <button
-                onClick={saveToDevice}
-                disabled={!canCommand || busy !== null || dirtyFields.length === 0}
-                className="btn-primary text-xs px-3 py-2"
-              >
-                {busy === "save" ? "Saving…" : `Save to device (${dirtyFields.length})`}
-              </button>
-              <button onClick={readRecords} disabled={!canCommand || busy !== null} className="btn-secondary text-xs px-3 py-2">
-                Read records
-              </button>
-              <button
-                onClick={() => {
-                  setConfirmReboot(true);
-                  setRebootAcknowledged(false);
-                }}
-                disabled={!canCommand || busy !== null}
-                className="bg-signal-red/20 hover:bg-signal-red/30 text-signal-red font-semibold px-3 py-2 rounded-md text-xs border border-signal-red/30 disabled:opacity-40"
-              >
-                Reboot device
-              </button>
-              <button onClick={saveToFile} className="btn-secondary text-xs px-3 py-2">
-                Save to file
-              </button>
-              <label className="btn-secondary text-xs px-3 py-2 cursor-pointer">
-                Load from file
-                <input type="file" accept="application/json,.json" onChange={loadFromFile} className="hidden" />
-              </label>
-            </div>
-            <input
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Change reason (audit log)"
-              className="input text-xs w-full 2xl:w-80 bg-base-900 border-base-700 text-ink-100"
-            />
+          <div className="flex flex-wrap gap-2 xl:justify-end min-w-0">
+            <button onClick={loadFromDevice} disabled={!canCommand || busy !== null} className="btn-secondary text-xs px-3 py-2">
+              {busy === "load" ? "Loading…" : "Load from device"}
+            </button>
+            <button
+              onClick={saveToDevice}
+              disabled={!canCommand || busy !== null || dirtyFields.length === 0}
+              className="btn-primary text-xs px-3 py-2"
+            >
+              {busy === "save" ? "Saving…" : `Save to device (${dirtyFields.length})`}
+            </button>
+            <label className="btn-secondary text-xs px-3 py-2 cursor-pointer">
+              Load from file
+              <input type="file" accept="application/json,.json" onChange={loadFromFile} className="hidden" />
+            </label>
+            <button onClick={saveToFile} className="btn-secondary text-xs px-3 py-2">
+              Save to file
+            </button>
+            <button onClick={readRecords} disabled={!canCommand || busy !== null} className="btn-secondary text-xs px-3 py-2">
+              {busy === "records" ? "Reading…" : "Read records"}
+            </button>
+            <button
+              onClick={() => {
+                setConfirmReboot(true);
+                setRebootAcknowledged(false);
+              }}
+              disabled={!canCommand || busy !== null}
+              className="bg-signal-red/20 hover:bg-signal-red/30 text-signal-red font-semibold px-3 py-2 rounded-md text-xs border border-signal-red/30 disabled:opacity-40"
+            >
+              Reboot device
+            </button>
           </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Change reason (audit log)"
+            className="input text-xs w-full sm:max-w-md bg-base-900 border-base-700 text-ink-100"
+          />
+          <span className="text-[10px] text-ink-500">
+            Toolbar actions queue through MeshSat. Device replies update the Status tabs automatically.
+          </span>
         </div>
 
         {!canCommand && (
@@ -701,69 +765,20 @@ export default function DeviceConfigurator() {
           )}
 
           {active?.key === "status" && (
-            <div className="space-y-4">
-              <div className="panel p-4">
-                <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider mb-3">Device Identity</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 text-xs">
-                  {[
-                    ["Model", config?.device_model ?? registry?.model ?? "—"],
-                    ["IMEI", routeImei],
-                    ["Firmware", config?.firmware_version ?? "—"],
-                    ["Configuration version", config?.config_version ?? "—"],
-                    ["Vehicle", config?.vehicle_number ?? currentDevice?.vehicle_number ?? "—"],
-                    ["Registration", config?.registration_number ?? currentDevice?.registration_number ?? "—"],
-                    ["Last seen", fmtDate(config?.device_last_seen_at)],
-                    ["Last applied", fmtDate(config?.last_applied_at)],
-                    ["Device info updated", fmtDate(config?.device_info_updated_at)],
-                    ["Registry parameters", String(config?.registry_param_count ?? registry?.field_count ?? "—")],
-                  ].map(([label, value]) => (
-                    <div key={label} className="min-w-0">
-                      <div className="text-[10px] uppercase tracking-wide text-ink-500">{label}</div>
-                      <div className="text-ink-100 font-mono break-all">{value}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="panel p-4">
-                <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider mb-3">Latest AVL State</h3>
-                {device?.live ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-5 gap-4 text-xs">
-                    {[
-                      ["Recorded", fmtDate(device.live.recorded_at)],
-                      ["Speed", device.live.speed_kmh != null ? `${device.live.speed_kmh} km/h` : "—"],
-                      ["Ignition", device.live.ignition === 1 ? "ON" : "OFF"],
-                      ["Movement", device.live.movement === 1 ? "Moving" : "Stationary"],
-                      ["Satellites", device.live.sats != null ? String(device.live.sats) : "—"],
-                      ["Fuel", device.live.fuel_liters != null ? `${device.live.fuel_liters} L` : "—"],
-                      ["External voltage", device.live.ext_voltage_v != null ? `${device.live.ext_voltage_v} V` : "—"],
-                      ["Internal battery", device.live.int_battery_v != null ? `${device.live.int_battery_v} V` : "—"],
-                      ["Odometer", device.live.odometer_km != null ? `${device.live.odometer_km} km` : "—"],
-                      ["Position", device.live.lat != null && device.live.lon != null ? `${device.live.lat.toFixed(5)}, ${device.live.lon.toFixed(5)}` : "No fix"],
-                    ].map(([label, value]) => (
-                      <div key={label} className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-wide text-ink-500">{label}</div>
-                        <div className="text-ink-100 break-words">{value}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-ink-500">No AVL record received yet.</p>
-                )}
-                {latestRecord && (
-                  <div className="mt-3 rounded-md bg-base-950 border border-base-800 p-3 text-[10px] font-mono text-ink-400 overflow-x-auto">
-                    {JSON.stringify(latestRecord, null, 2)}
-                  </div>
-                )}
-              </div>
-
-              <div className="panel p-4">
-                <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider mb-3">Last Device Replies</h3>
-                <pre className="text-[10px] font-mono text-ink-400 whitespace-pre-wrap break-all max-h-80 overflow-auto">
-                  {JSON.stringify(config?.device_info ?? {}, null, 2)}
-                </pre>
-              </div>
-            </div>
+            <StatusPanel
+              config={config}
+              device={device}
+              imei={selectedImei}
+              online={online}
+              commands={commands}
+              busy={busy}
+              canCommand={canCommand}
+              onDiagnostic={runDiagnostic}
+              onReboot={() => {
+                setConfirmReboot(true);
+                setRebootAcknowledged(false);
+              }}
+            />
           )}
 
           {active?.key === "features" && (
@@ -831,7 +846,7 @@ export default function DeviceConfigurator() {
           <div className="panel p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Raw / Advanced Parameter ID Override</h3>
+                <h3 className="text-sm font-bold text-ink-100 uppercase tracking-wider">Raw Parameter ID (getparam / setparam)</h3>
                 <p className="text-[11px] text-ink-500 mt-0.5">
                   Direct Codec 12 testing. Values are sent as `setparam &lt;id&gt;:&lt;value&gt;`; reads use `getparam &lt;id&gt;`.
                 </p>
@@ -941,7 +956,7 @@ export default function DeviceConfigurator() {
           <div className="panel max-w-lg w-full p-5 space-y-4">
             <div>
               <div className="text-[10px] uppercase tracking-widest text-signal-red font-semibold">Dangerous action</div>
-              <h2 className="text-lg font-bold text-ink-100">Reboot {routeImei}?</h2>
+              <h2 className="text-lg font-bold text-ink-100">Reboot {selectedImei}?</h2>
               <p className="text-xs text-ink-400 mt-1">
                 This queues `cpureset` through MeshSat. The tracker restarts on its next sync and will be offline briefly.
               </p>

@@ -2,15 +2,29 @@
  * Client for the fleet telemetry API (`/api/telemetry`), which is mounted
  * outside the `/api/v1` prefix used by the rest of the FMS API.
  */
+import { getToken, isTokenExpiring, refreshAccessToken } from "./client";
+
 const TELEMETRY_BASE = "/api/telemetry";
 
-function authHeader(): Record<string, string> {
-  const token = localStorage.getItem("fms_access_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+async function authorizedFetch(
+  url: string,
+  init: RequestInit = {},
+  retried = false
+): Promise<Response> {
+  let token = getToken();
+  if (isTokenExpiring(token)) token = await refreshAccessToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401 && !retried) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) return authorizedFetch(url, init, true);
+  }
+  return res;
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${TELEMETRY_BASE}${path}`, { headers: { ...authHeader() } });
+  const res = await authorizedFetch(`${TELEMETRY_BASE}${path}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || "Request failed");
@@ -19,9 +33,9 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 async function postJson<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${TELEMETRY_BASE}${path}`, {
+  const res = await authorizedFetch(`${TELEMETRY_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeader() },
+    headers: { "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({ error: res.statusText }));
@@ -105,9 +119,8 @@ export const telemetryApi = {
       `/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
     ),
   exportCsv: async (from: string, to: string): Promise<Blob> => {
-    const res = await fetch(
-      `${TELEMETRY_BASE}/export?format=csv&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-      { headers: { ...authHeader() } }
+    const res = await authorizedFetch(
+      `${TELEMETRY_BASE}/export?format=csv&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
     );
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));

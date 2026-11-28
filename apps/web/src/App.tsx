@@ -92,6 +92,8 @@ function AppRoutes() {
 
           <Route path="/fleet-consumption" element={<DivisionConsumption />} />
           <Route path="/vehicles" element={<Vehicles />} />
+          <Route path="/device-configurator" element={<DeviceConfigurator />} />
+          <Route path="/device-configurator/:imei" element={<DeviceConfigurator />} />
           <Route path="/drivers" element={<Drivers />} />
           <Route path="/drivers/:id" element={<DriverDetail />} />
           <Route path="/fleet-allocations" element={<VehicleAllocations />} />

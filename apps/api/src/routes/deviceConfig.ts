@@ -438,7 +438,7 @@ router.post("/:imei/load", requireAuth, requireRole(...COMMAND_ROLES), async (re
     const paramIds = [...new Set(parsed.data.param_ids ?? TELTONIKA_LOAD_PARAM_IDS)].slice(0, 150);
     const results: any[] = [];
 
-    for (const command of ["getinfo", "getver", "getstatus", "getio"]) {
+    for (const command of ["getinfo", "getver", "getstatus", "getio", "getgps"]) {
       const result = await dispatchAndAudit({
         imei,
         vehicleId: device!.vehicle_id!,
@@ -481,7 +481,7 @@ router.post("/:imei/load", requireAuth, requireRole(...COMMAND_ROLES), async (re
 
     res.status(201).json({
       data: { commands: results, param_ids: paramIds },
-      message: `Load requested: 4 identity commands and ${paramIds.length} parameter reads queued. Values update as the tracker replies.`,
+      message: `Load requested: 5 identity commands and ${paramIds.length} parameter reads queued. Values update as the tracker replies.`,
     });
   } catch (e) {
     next(e);

@@ -379,7 +379,9 @@ describe("MeshSat map proxy", () => {
     const html = await res.text();
     expect(html).toContain("fms-map-auth-error");
     expect(html).toContain("fms-map-tile-error");
+    expect(html).toContain("fms-map-tile-ok");
     expect(html).toContain("fms-map-ready");
+    expect(html).toContain("fms_retry");
     expect(html).toContain("World_Topo_Map");
     expect(html).toContain("tile.openstreetmap.org");
     expect(html).toContain("fms_token");

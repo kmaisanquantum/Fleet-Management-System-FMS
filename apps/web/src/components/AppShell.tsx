@@ -41,6 +41,10 @@ const NAV_GROUPS: {
     ],
   },
   {
+    title: "Device Management",
+    items: [{ to: "/device-configurator", label: "FMB125 Configurator" }],
+  },
+  {
     title: "Administration",
     adminOnly: true,
     items: [

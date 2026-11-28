@@ -172,6 +172,7 @@ export interface DeviceCommandAction {
     | "getver"
     | "getstatus"
     | "getgps"
+    | "getio"
     | "readio"
     | "getparam"
     | "setparam"

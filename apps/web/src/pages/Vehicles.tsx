@@ -438,7 +438,7 @@ export default function Vehicles() {
                   <div className="flex items-center justify-end gap-2">
                     {imei && (
                       <Link
-                        to={`/telemetry/device/${encodeURIComponent(imei)}/configurator`}
+                        to={`/device-configurator/${encodeURIComponent(imei)}`}
                         className="px-2 py-1 text-xs font-medium text-sky-400 hover:text-sky-300 hover:bg-base-800 rounded"
                       >
                         Configure
