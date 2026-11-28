@@ -316,6 +316,23 @@ describe("Remote device configuration router", () => {
     expect(sent.command_id).toBeTruthy();
   });
 
+  it("maps MeshSat bridge auth failures to 502 instead of a session 401", async () => {
+    process.env.MESHSAT_BRIDGE_URL = "https://bridge.test";
+    process.env.MESHSAT_BRIDGE_TOKEN = "bad-bridge-token";
+    const bridge = vi.fn(() => Promise.resolve(fakeResponse(false, 401, '{"error":"unauthorized"}')));
+    vi.stubGlobal("fetch", (url: any, opts?: any) => {
+      if (String(url) === "https://bridge.test/api/devices") return bridge();
+      return realFetch(url, opts);
+    });
+
+    const { status, body } = await get("/api/devices/bridge", adminToken);
+    expect(status).toBe(502);
+    expect(body.configured).toBe(true);
+    expect(body.upstream_status).toBe(401);
+    expect(body.error).toContain("unavailable");
+    expect(bridge).toHaveBeenCalledTimes(1);
+  });
+
   it("queues an offline command and flushes it when telemetry checks in", async () => {
     const gateway = stubGateway(() => fakeResponse(true, 202, "{}"));
     db.prepare("UPDATE gps_devices SET last_seen_at = datetime('now', '-2 hours') WHERE device_identifier = ?").run(imei);

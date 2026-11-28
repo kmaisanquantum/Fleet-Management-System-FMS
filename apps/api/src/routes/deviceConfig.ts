@@ -399,9 +399,12 @@ router.get("/bridge", requireAuth, requireRole(...COMMAND_ROLES), async (_req, r
       return res.status(503).json({ error: result.text, configured: false });
     }
     if (!result.ok) {
-      return res.status(result.status || 502).json({
+      // A bridge auth/transport failure is not the browser session expiring.
+      // Never forward the bridge's 401/403, or the SPA will sign the user out.
+      return res.status(result.status === 0 ? 504 : 502).json({
         error: "MeshSat bridge device inventory unavailable",
         detail: result.text,
+        upstream_status: result.status,
         configured: true,
       });
     }
