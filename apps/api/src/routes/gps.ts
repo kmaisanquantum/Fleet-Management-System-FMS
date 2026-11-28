@@ -5,6 +5,7 @@ import { db } from "../db";
 import { requireAuth, apiKeyOrAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { writeAudit } from "../utils/audit";
+import { evaluateTelemetryAlerts, persistFleetAlerts, type PreviousTelemetry } from "../services/fleetAlerts";
 
 const router = Router();
 
@@ -71,12 +72,15 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
   try {
     const input = gpsPositionSchema.parse(req.body);
 
-    let vehicleId = input.vehicleId;
-    if (!vehicleId && input.deviceIdentifier) {
-      const dev = db.prepare("SELECT vehicle_id FROM gps_devices WHERE device_identifier = ?").get(input.deviceIdentifier) as any;
-      if (dev) vehicleId = dev.vehicle_id;
-    }
+    const device = input.deviceIdentifier
+      ? (db
+          .prepare("SELECT id, vehicle_id, client_id, device_identifier FROM gps_devices WHERE device_identifier = ?")
+          .get(input.deviceIdentifier) as
+          | { id: string; vehicle_id: string | null; client_id: string | null; device_identifier: string }
+          | undefined)
+      : undefined;
 
+    const vehicleId = input.vehicleId ?? device?.vehicle_id;
     if (!vehicleId) {
       return res.status(400).json({
         error: "Unknown device or missing vehicle binding",
@@ -84,8 +88,43 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
       });
     }
 
+    const vehicleInfo = db
+      .prepare("SELECT vehicle_number, registration_number, client_id FROM vehicles WHERE id = ?")
+      .get(vehicleId) as
+      | { vehicle_number: string; registration_number: string; client_id: string | null }
+      | undefined;
+    const boundDevice =
+      device ??
+      (db
+        .prepare("SELECT id, client_id, device_identifier FROM gps_devices WHERE vehicle_id = ? LIMIT 1")
+        .get(vehicleId) as { id: string; client_id: string | null; device_identifier: string } | undefined);
+
     const recordedAt = input.recordedAt || new Date().toISOString().replace("T", " ").substring(0, 19);
     const posId = uuid();
+
+    const previousRow = db
+      .prepare(`
+        SELECT ignition, external_voltage_mv, lat, lon, io_json
+        FROM gps_positions
+        WHERE vehicle_id = ? AND datetime(recorded_at) < datetime(?)
+        ORDER BY recorded_at DESC LIMIT 1
+      `)
+      .get(vehicleId, recordedAt) as
+      | { ignition: number | null; external_voltage_mv: number | null; lat: number | null; lon: number | null; io_json: string | null }
+      | undefined;
+    let previousIo: Record<string, number> = {};
+    if (previousRow?.io_json) {
+      try { previousIo = JSON.parse(previousRow.io_json); } catch {}
+    }
+    const previous: PreviousTelemetry | null = previousRow
+      ? {
+          ignition: previousRow.ignition,
+          extVoltageV: previousRow.external_voltage_mv != null ? previousRow.external_voltage_mv / 1000 : null,
+          lat: previousRow.lat,
+          lon: previousRow.lon,
+          io: previousIo,
+        }
+      : null;
 
     db.prepare(`
       INSERT INTO gps_positions (
@@ -126,9 +165,18 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
     // Update vehicle live state cache fields
     db.prepare(`
       UPDATE vehicles
-      SET current_latitude = ?, current_longitude = ?, current_odometer = MAX(current_odometer, ?), last_gps_fix_at = ?
+      SET current_latitude = ?, current_longitude = ?, current_odometer = MAX(current_odometer, ?),
+          last_gps_fix_at = ?, last_seen_at = datetime('now')
       WHERE id = ?
     `).run(input.lat, input.lon, input.odometer, recordedAt, vehicleId);
+
+    // Legacy relay ingest must stamp the same heartbeat as /api/telemetry/ingest,
+    // otherwise the live map and offline watchdog treat actively reporting devices as offline.
+    if (boundDevice?.id) {
+      db.prepare("UPDATE gps_devices SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(boundDevice.id);
+    } else {
+      db.prepare("UPDATE gps_devices SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE vehicle_id = ?").run(vehicleId);
+    }
 
     // Live-state caches for fuel level (reconciliation) and engine hours (maintenance)
     if (input.fuelLevelPct !== undefined) {
@@ -177,8 +225,40 @@ router.post("/positions", apiKeyOrAuth, (req, res, next) => {
       );
     }
 
+    // Evaluate the same configurable alert rules as the rich ingest path so
+    // legacy relay traffic (teltonika-relay and MeshSat fallback) still raises
+    // overspeed, ignition, power, geofence and security alerts.
+    const fleetAlertCandidates = evaluateTelemetryAlerts({
+      imei: boundDevice?.device_identifier ?? input.deviceIdentifier ?? vehicleId,
+      vehicleId,
+      vehicleNumber: vehicleInfo?.vehicle_number ?? "Unknown vehicle",
+      registrationNumber: vehicleInfo?.registration_number ?? "—",
+      clientId: boundDevice?.client_id ?? vehicleInfo?.client_id ?? null,
+      lat: input.lat,
+      lon: input.lon,
+      speed: input.speed ?? null,
+      ignition: input.ignition,
+      voltage: input.externalVoltage != null ? input.externalVoltage / 1000 : null,
+      recordedAt,
+      io: input.io ?? {},
+      previous,
+    });
+    const insertedFleetAlerts = persistFleetAlerts(fleetAlertCandidates, {
+      imei: boundDevice?.device_identifier ?? input.deviceIdentifier ?? vehicleId,
+      vehicleId,
+      lat: input.lat,
+      lon: input.lon,
+      speed: input.speed ?? null,
+      voltage: input.externalVoltage != null ? input.externalVoltage / 1000 : null,
+      createdAt: recordedAt,
+    });
+
     const inserted = db.prepare("SELECT * FROM gps_positions WHERE id = ?").get(posId);
-    res.status(201).json({ data: inserted, message: "GPS position recorded" });
+    res.status(201).json({
+      data: inserted,
+      fleet_alerts: insertedFleetAlerts.length,
+      message: "GPS position recorded",
+    });
   } catch (e) {
     next(e);
   }
