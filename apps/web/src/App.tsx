@@ -22,6 +22,8 @@ import TelemetryLive from "./pages/TelemetryLive";
 import TelemetryReport from "./pages/TelemetryReport";
 import DeviceTelemetry from "./pages/DeviceTelemetry";
 import DeviceConfigurator from "./pages/DeviceConfigurator";
+import FleetReports from "./pages/FleetReports";
+import AlertsSettings from "./pages/AlertsSettings";
 
 import Alerts from "./pages/Alerts";
 import AuditLog from "./pages/AuditLog";
@@ -101,6 +103,8 @@ function AppRoutes() {
           <Route path="/fleet-trips" element={<VehicleTrips />} />
           <Route path="/fleet-inspections" element={<VehicleInspections />} />
           <Route path="/fleet-maintenance" element={<VehicleMaintenance />} />
+          <Route path="/reports" element={<FleetReports />} />
+          <Route path="/alerts-settings" element={<RequireAdmin><AlertsSettings /></RequireAdmin>} />
 
           <Route path="/alerts" element={<RequireAdmin><Alerts /></RequireAdmin>} />
           <Route path="/audit" element={<RequireAdmin><AuditLog /></RequireAdmin>} />

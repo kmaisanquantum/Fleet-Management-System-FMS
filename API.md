@@ -125,3 +125,26 @@ Command statuses: `queued` → `sent` → `acknowledged` (the VPS reports the tr
 
 ## Audit Logs — `/api/v1/audit-logs`
 GET `?entity=&entityId=&userId=&limit=` — restricted to admin, auditor, national_fuel_manager, executive.
+
+## Fleet Reports — `/api/v1/reports`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/options` | Vehicles, IMEIs, fleet groups and report types available to the caller |
+| GET | `/:type` | Build `trip-mileage`, `driver-behaviour`, `geofence-idle`, `fuel-utilization` or `device-health` with `?from=&to=&vehicleId=&imei=&group=`; add `format=csv` for a download |
+| POST | `/:type/email` | Email the report now to `report_recipient_email` (default `fleet@dspng.tech`) with a CSV attachment |
+
+`from` / `to` are interpreted as Port Moresby (UTC+10) when they are date-only or `datetime-local` values. The response contains KPI cards and one or more table sections so the same payload drives the screen, CSV and email.
+
+## Alerts & Email Rules — `/api/v1/alert-settings`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | SMTP status, recipients, thresholds, toggles and daily/weekly/monthly schedules |
+| PUT | `/` | Update alert/report recipients, CC lists, overspeed/low-voltage thresholds, cooldown, offline windows and schedules. Admin only. |
+| POST | `/test-email` | Send an SMTP test message to the configured alert recipient. Admin only. |
+| GET | `/deliveries` | Recent SMTP delivery attempts (`?limit=`) including `sent`, `failed` and `skipped` |
+| GET | `/alerts` | Recent real-time `fleet_alerts` rows (`?limit=`) |
+| PATCH | `/alerts/:id/ack` | Acknowledge a real-time alert |
+
+Real-time alerts are evaluated inside the telemetry ingest path: overspeed, ignition ON/OFF, power cut, low voltage, geofence entry/exit, jamming, immobilizer, SOS, DIN triggers, towing, crash, excessive idling and harsh driving. Duplicate alerts are suppressed for `alert_cooldown_seconds`; the offline watchdog checks silent devices every minute. Every alert and report delivery is written to `email_deliveries`; alerts are persisted in `fleet_alerts` even when SMTP is not configured.

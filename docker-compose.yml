@@ -17,6 +17,17 @@ services:
       # Shared secret for machine-to-machine telemetry ingest (x-api-key). Must match
       # the FMS_API_KEY used by the meshsat-relay / teltonika-relay services.
       TELEMETRY_API_KEY: ${TELEMETRY_API_KEY}
+      # Real-time alert + scheduled report delivery. Defaults route to fleet@dspng.tech.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-fleet@dspng.tech}
+      ALERT_RECIPIENT_EMAIL: ${ALERT_RECIPIENT_EMAIL:-fleet@dspng.tech}
+      REPORT_RECIPIENT_EMAIL: ${REPORT_RECIPIENT_EMAIL:-fleet@dspng.tech}
+      DISABLE_ALERT_MONITOR: ${DISABLE_ALERT_MONITOR:-false}
+      DISABLE_REPORT_SCHEDULER: ${DISABLE_REPORT_SCHEDULER:-false}
     volumes:
       - api-data:/app/data
     healthcheck:

@@ -5,6 +5,7 @@
   "description": "Fleet Management System - monorepo root",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
+    "build": "npm --prefix apps/api run build && npm --prefix apps/web run build",
     "dev:api": "npm --prefix apps/api run dev",
     "dev:web": "npm --prefix apps/web run dev",
     "seed": "npm --prefix apps/api run seed"

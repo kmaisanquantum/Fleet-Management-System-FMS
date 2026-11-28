@@ -7,6 +7,7 @@ import { resolveClientScopes } from "../utils/scope";
 import { writeAudit } from "../utils/audit";
 import { isDeviceOnline, offlineWindowMinutes } from "../utils/deviceStatus";
 import { flushQueuedCommandsForImei } from "../services/deviceCommands";
+import { evaluateTelemetryAlerts, persistFleetAlerts, type PreviousTelemetry } from "../services/fleetAlerts";
 
 export { isDeviceOnline, offlineWindowMinutes };
 
@@ -301,6 +302,9 @@ router.post("/ingest", requireIngestToken, async (req, res, next) => {
     }
 
     const vehicleId = device.vehicle_id;
+    const vehicleInfo = db
+      .prepare("SELECT vehicle_number, registration_number FROM vehicles WHERE id = ?")
+      .get(vehicleId) as { vehicle_number: string; registration_number: string } | undefined;
     const recordedAt = normalizeTimestamp(input.timestamp);
     const io = input.io ?? {};
     // IO 16 odometer reports metres; store kilometres (the raw value stays in
@@ -315,6 +319,31 @@ router.post("/ingest", requireIngestToken, async (req, res, next) => {
     // IO 12/13 are the Teltonika fuel counters; keep the raw value alongside
     // io_json for diagnostics while refuel/drain is derived from fuel_liters.
     const fuelCounter = ioValue(io, IO_FUEL_COUNTER) ?? null;
+
+    // Previous AVL record for ignition-edge, DIN-edge and geofence transition
+    // detection. Queried before the insert so it is genuinely the prior fix.
+    const previousRow = db.prepare(`
+      SELECT ignition, ext_voltage_v, lat, lon, io_json
+      FROM telemetry_records
+      WHERE imei = ? AND recorded_at < ?
+      ORDER BY recorded_at DESC LIMIT 1
+    `).get(input.imei, recordedAt) as
+      | { ignition: number | null; ext_voltage_v: number | null; lat: number | null; lon: number | null; io_json: string | null }
+      | undefined;
+    let previousIo: Record<string, number> = {};
+    if (previousRow?.io_json) {
+      try { previousIo = JSON.parse(previousRow.io_json); } catch {}
+    }
+    const previous: PreviousTelemetry | null = previousRow
+      ? {
+          ignition: previousRow.ignition,
+          extVoltageV: previousRow.ext_voltage_v,
+          lat: previousRow.lat,
+          lon: previousRow.lon,
+          io: previousIo,
+        }
+      : null;
+
     const posId = uuid();
 
     const insert = db.prepare(`
@@ -432,6 +461,33 @@ router.post("/ingest", requireIngestToken, async (req, res, next) => {
       insertException.run(uuid(), alert.severity, alert.category, alert.type, alert.ruleCode, vehicleId, driverId, posId, alert.description, recordedAt);
     }
 
+    // Real-time alert engine: configurable rules, cooldown/dedup persistence,
+    // and immediate SMTP forwarding to fleet@dspng.tech.
+    const fleetAlertCandidates = evaluateTelemetryAlerts({
+      imei: input.imei,
+      vehicleId,
+      vehicleNumber: vehicleInfo?.vehicle_number ?? "Unknown vehicle",
+      registrationNumber: vehicleInfo?.registration_number ?? "—",
+      clientId: device.client_id,
+      lat: input.lat,
+      lon: input.lon,
+      speed: input.speed_kmh ?? null,
+      ignition: ignitionValue(input),
+      voltage: normalized.ext_voltage_v,
+      recordedAt,
+      io,
+      previous,
+    });
+    const insertedFleetAlerts = persistFleetAlerts(fleetAlertCandidates, {
+      imei: input.imei,
+      vehicleId,
+      lat: input.lat,
+      lon: input.lon,
+      speed: input.speed_kmh ?? null,
+      voltage: normalized.ext_voltage_v,
+      createdAt: recordedAt,
+    });
+
     // Safety-relevant IO events also feed driver-intelligence scoring
     const driverEventMap: Record<number, { type: string; magnitude: number }> = {
       247: { type: "crash", magnitude: input.speed_kmh ?? 0 },
@@ -456,6 +512,7 @@ router.post("/ingest", requireIngestToken, async (req, res, next) => {
     return res.status(201).json({
       data: position,
       alerts: alerts.length,
+      fleet_alerts: insertedFleetAlerts.length,
       fuelCounter,
       flushed_commands: flushed,
       message: "Telemetry ingested",

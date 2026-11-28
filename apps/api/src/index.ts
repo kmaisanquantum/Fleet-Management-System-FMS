@@ -38,6 +38,10 @@ import driverIntelligenceRoutes from "./routes/driverIntelligence";
 import utilisationRoutes from "./routes/utilisation";
 import settingsRoutes from "./routes/settings";
 import deviceConfigRoutes from "./routes/deviceConfig";
+import reportsRoutes from "./routes/reports";
+import alertSettingsRoutes from "./routes/alertSettings";
+import { startAlertMonitor } from "./services/fleetAlerts";
+import { startReportScheduler } from "./services/reportScheduler";
 
 initSchema();
 ensureBootstrapAccounts();
@@ -88,6 +92,8 @@ app.use("/api/v1/fleet", utilisationRoutes);
 app.use("/api/v1/exceptions", exceptionsRoutes);
 app.use("/api/v1/driver-intelligence", driverIntelligenceRoutes);
 app.use("/api/v1/settings", settingsRoutes);
+app.use("/api/v1/reports", reportsRoutes);
+app.use("/api/v1/alert-settings", alertSettingsRoutes);
 // Remote FMB125 configuration. `/api/devices` is the documented path; the
 // `/api/v1/devices` alias lets the SPA reuse its normal token-refresh client.
 app.use("/api/devices", deviceConfigRoutes);
@@ -108,6 +114,8 @@ const PORT = Number(process.env.PORT) || 4000;
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`Fleet Management System API listening on port ${PORT}`);
+  startAlertMonitor();
+  startReportScheduler();
 });
 
 export default app;
