@@ -317,6 +317,84 @@ function migrateExistingDatabase() {
     ('pm-ignition-source',     'ignition_source',       1000, 'Ignition source selection'),
     ('pm-digital-output',      'digital_output_control', 1028, 'Digital output (DOUT1) control');`);
 
+  // Fuel cards gained provider/assignment/limit metadata for the Fuel Cards
+  // module. Keep the legacy vehicle_id/authorised_driver_id columns in sync.
+  addColumn("fuel_cards", "provider", "TEXT");
+  addColumn("fuel_cards", "assigned_vehicle_id", "TEXT REFERENCES vehicles(id)");
+  addColumn("fuel_cards", "assigned_imei", "TEXT");
+  addColumn("fuel_cards", "assigned_driver_id", "TEXT REFERENCES drivers(id)");
+  addColumn("fuel_cards", "daily_limit_liters", "REAL");
+  addColumn("fuel_cards", "monthly_limit_amount", "REAL");
+  addColumn("fuel_cards", "notes", "TEXT");
+  addColumn("fuel_cards", "updated_at", "TEXT");
+
+  rebuildIfCheckMissing(
+    "fuel_cards",
+    "lost",
+    `CREATE TABLE fuel_cards (
+      id TEXT PRIMARY KEY,
+      card_number TEXT UNIQUE NOT NULL,
+      provider TEXT,
+      vehicle_id TEXT REFERENCES vehicles(id),
+      authorised_driver_id TEXT REFERENCES drivers(id),
+      assigned_vehicle_id TEXT REFERENCES vehicles(id),
+      assigned_imei TEXT,
+      assigned_driver_id TEXT REFERENCES drivers(id),
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'suspended', 'blocked', 'cancelled', 'lost')),
+      limits TEXT,
+      daily_limit_liters REAL,
+      monthly_limit_amount REAL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`
+  );
+
+  runIgnoreErrors("UPDATE fuel_cards SET assigned_vehicle_id = COALESCE(assigned_vehicle_id, vehicle_id);");
+  runIgnoreErrors("UPDATE fuel_cards SET assigned_driver_id = COALESCE(assigned_driver_id, authorised_driver_id);");
+  runIgnoreErrors("UPDATE fuel_cards SET updated_at = COALESCE(updated_at, created_at);");
+
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS fuel_card_transactions (
+    id TEXT PRIMARY KEY,
+    fuel_card_id TEXT REFERENCES fuel_cards(id),
+    card_number TEXT NOT NULL,
+    vehicle_id TEXT REFERENCES vehicles(id),
+    imei TEXT,
+    transaction_at TEXT NOT NULL,
+    station_name TEXT,
+    station_lat REAL,
+    station_lon REAL,
+    liters REAL NOT NULL,
+    amount REAL,
+    currency TEXT NOT NULL DEFAULT 'PGK',
+    gps_lat REAL,
+    gps_lon REAL,
+    distance_km REAL,
+    status TEXT NOT NULL DEFAULT 'matched' CHECK(status IN ('matched', 'flagged')),
+    flag_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );`);
+
+  runIgnoreErrors(`CREATE TABLE IF NOT EXISTS camera_feeds (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'vehicle' CHECK(scope IN ('depot', 'vehicle')),
+    depot TEXT,
+    vehicle_id TEXT REFERENCES vehicles(id),
+    imei TEXT,
+    stream_url TEXT,
+    snapshot_url TEXT,
+    mode TEXT NOT NULL DEFAULT 'snapshot' CHECK(mode IN ('snapshot', 'mjpeg', 'hls', 'webrtc')),
+    poll_interval_sec INTEGER NOT NULL DEFAULT 60,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT,
+    last_checked_at TEXT,
+    last_error TEXT,
+    client_id TEXT REFERENCES clients(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );`);
+
   // Indexes that reference the columns added above (created here so they work
   // on databases that predate those columns).
   runIgnoreErrors("CREATE UNIQUE INDEX IF NOT EXISTS uq_gps_positions_imei_time ON gps_positions(imei, recorded_at) WHERE imei IS NOT NULL;");
@@ -331,6 +409,12 @@ function migrateExistingDatabase() {
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_gps_devices_client ON gps_devices(client_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id);");
   runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_fleet_exceptions_type ON fleet_exceptions(type);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_fuel_card_txn_card ON fuel_card_transactions(fuel_card_id, transaction_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_fuel_card_txn_vehicle ON fuel_card_transactions(vehicle_id, transaction_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_fuel_card_txn_status ON fuel_card_transactions(status, transaction_at DESC);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_camera_feeds_vehicle ON camera_feeds(vehicle_id, is_active);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_camera_feeds_depot ON camera_feeds(depot, is_active);");
+  runIgnoreErrors("CREATE INDEX IF NOT EXISTS idx_camera_feeds_client ON camera_feeds(client_id, is_active);");
 
   // CHECK constraints that gained new allowed values require a table rebuild
   // in SQLite. Rebuild only when the new value is missing from the old DDL.

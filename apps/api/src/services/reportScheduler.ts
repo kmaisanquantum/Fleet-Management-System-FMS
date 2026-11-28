@@ -105,7 +105,7 @@ async function dispatchSchedule(kind: "daily" | "weekly" | "monthly", now: Date)
         <div style="font-size:12px;color:#94a3b8;margin-top:4px">${period.label}</div>
       </div>
       <div style="background:#fff;padding:20px 24px;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 10px 10px">
-        <p style="color:#334155;font-size:13px">Five fleet reports are attached as CSV. The sections below summarise each report.</p>
+        <p style="color:#334155;font-size:13px">Six fleet reports are attached as CSV. The sections below summarise each report.</p>
         ${reports.map((report) => reportToHtml(report)).join("<hr style=\"border:0;border-top:1px solid #e2e8f0;margin:22px 0\">")}
       </div>
     </div>

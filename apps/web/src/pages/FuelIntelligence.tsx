@@ -1,5 +1,15 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { apiGet, apiPost } from "../api/client";
+import { fuelCardsApi, type FuelCardSummary, type FuelCardTransaction } from "../api/fuelCards";
+
+function pgt(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("en-AU", { timeZone: "Pacific/Port_Moresby", hour12: false });
+}
 
 interface FuelTxn {
   id: string;
@@ -29,6 +39,8 @@ export default function FuelIntelligence() {
   const [cards, setCards] = useState<any[]>([]);
   const [stations, setStations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cardSummary, setCardSummary] = useState<FuelCardSummary | null>(null);
+  const [flaggedSwipes, setFlaggedSwipes] = useState<FuelCardTransaction[]>([]);
 
   const [statusFilter, setStatusFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -54,7 +66,22 @@ export default function FuelIntelligence() {
 
   useEffect(() => {
     loadData();
+    loadCardData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, sourceFilter]);
+
+  async function loadCardData() {
+    try {
+      const [summaryRes, flaggedRes] = await Promise.all([
+        fuelCardsApi.summary(),
+        fuelCardsApi.transactions({ status: "flagged", limit: 5 }),
+      ]);
+      setCardSummary(summaryRes.data);
+      setFlaggedSwipes(flaggedRes.data);
+    } catch (err) {
+      console.error("Failed to load fuel card reconciliation:", err);
+    }
+  }
 
   async function loadData() {
     setLoading(true);
@@ -147,6 +174,63 @@ export default function FuelIntelligence() {
           <div className="text-xs font-semibold text-red-400 uppercase">Exceptions Flagged</div>
           <div className="text-2xl font-bold text-red-400 mt-1">{exceptionCount}</div>
         </div>
+      </div>
+
+      {/* Fuel card reconciliation summary */}
+      <div className="bg-base-900 border border-base-700 rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-ink-100">Fuel card reconciliation</h2>
+            <p className="text-xs text-ink-500">Card swipes matched against vehicle GPS, card status and limits.</p>
+          </div>
+          <Link to="/fuel-cards" className="btn-secondary text-xs px-3 py-2">Manage fuel cards →</Link>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="rounded-lg border border-base-700 p-3">
+            <div className="text-[10px] uppercase tracking-wide text-ink-500">Registered cards</div>
+            <div className="text-xl font-bold text-ink-100 mt-1">{cardSummary?.cards.total ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-base-700 p-3">
+            <div className="text-[10px] uppercase tracking-wide text-ink-500">Flagged swipes</div>
+            <div className="text-xl font-bold text-red-400 mt-1">{cardSummary?.transactions.flagged ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-base-700 p-3">
+            <div className="text-[10px] uppercase tracking-wide text-ink-500">Matched swipes</div>
+            <div className="text-xl font-bold text-emerald-400 mt-1">{cardSummary?.transactions.matched ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-base-700 p-3">
+            <div className="text-[10px] uppercase tracking-wide text-ink-500">Card spend</div>
+            <div className="text-xl font-bold text-ink-100 mt-1">
+              PGK {Number(cardSummary?.transactions.amount ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+          </div>
+        </div>
+        {flaggedSwipes.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-ink-200">
+              <thead className="text-ink-400 border-b border-base-700 uppercase tracking-wider">
+                <tr>
+                  <th className="py-2 pr-4">Time</th>
+                  <th className="py-2 pr-4">Card</th>
+                  <th className="py-2 pr-4">Vehicle</th>
+                  <th className="py-2 pr-4">Litres</th>
+                  <th className="py-2">Flag reason</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-base-800">
+                {flaggedSwipes.map((txn) => (
+                  <tr key={txn.id}>
+                    <td className="py-2 pr-4 font-mono whitespace-nowrap">{pgt(txn.transaction_at)}</td>
+                    <td className="py-2 pr-4 font-mono">{txn.card_number}</td>
+                    <td className="py-2 pr-4">{txn.vehicle_number || "Unassigned"}</td>
+                    <td className="py-2 pr-4 font-mono">{txn.liters} L</td>
+                    <td className="py-2 text-red-300">{txn.flag_reason || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Filter Bar */}

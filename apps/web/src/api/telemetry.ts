@@ -56,7 +56,7 @@ export interface TelemetryLatest {
   lon: number | null;
   fuel_level_pct: number | null;
   recorded_at: string | null;
-  /** Timestamp of the most recent successful ingest (offline watchdog). */
+  /** Most recent successful ingest, falling back to the last GPS fix. */
   last_seen_at: string | null;
   /** True when last_seen_at is within DEVICE_OFFLINE_MINUTES (default 15). */
   online: boolean;

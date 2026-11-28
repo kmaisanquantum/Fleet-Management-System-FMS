@@ -24,6 +24,8 @@ import DeviceTelemetry from "./pages/DeviceTelemetry";
 import DeviceConfigurator from "./pages/DeviceConfigurator";
 import FleetReports from "./pages/FleetReports";
 import AlertsSettings from "./pages/AlertsSettings";
+import FuelCards from "./pages/FuelCards";
+import Cameras from "./pages/Cameras";
 
 import Alerts from "./pages/Alerts";
 import AuditLog from "./pages/AuditLog";
@@ -100,10 +102,12 @@ function AppRoutes() {
           <Route path="/drivers/:id" element={<DriverDetail />} />
           <Route path="/fleet-allocations" element={<VehicleAllocations />} />
           <Route path="/fleet-fuel" element={<VehicleFuelLogs />} />
+          <Route path="/fuel-cards" element={<FuelCards />} />
           <Route path="/fleet-trips" element={<VehicleTrips />} />
           <Route path="/fleet-inspections" element={<VehicleInspections />} />
           <Route path="/fleet-maintenance" element={<VehicleMaintenance />} />
           <Route path="/reports" element={<FleetReports />} />
+          <Route path="/cameras" element={<Cameras />} />
           <Route path="/alerts-settings" element={<RequireAdmin><AlertsSettings /></RequireAdmin>} />
 
           <Route path="/alerts" element={<RequireAdmin><Alerts /></RequireAdmin>} />

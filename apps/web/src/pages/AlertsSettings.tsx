@@ -239,6 +239,18 @@ export default function AlertsSettings() {
               <label className="label">Idle exception (minutes)</label>
               <input type="number" className="input text-xs" value={settings.thresholds.idleMinutes} onChange={(event) => patchThreshold("idleMinutes", Number(event.target.value))} />
             </div>
+            <div>
+              <label className="label">Fuel card GPS distance (km)</label>
+              <input type="number" step="0.1" className="input text-xs" value={settings.thresholds.fuelCardDistanceKm} onChange={(event) => patchThreshold("fuelCardDistanceKm", Number(event.target.value))} />
+            </div>
+            <div>
+              <label className="label">Camera offline after (minutes)</label>
+              <input type="number" className="input text-xs" value={settings.thresholds.cameraOfflineMinutes} onChange={(event) => patchThreshold("cameraOfflineMinutes", Number(event.target.value))} />
+            </div>
+            <div>
+              <label className="label">Camera offline repeat (minutes)</label>
+              <input type="number" className="input text-xs" value={settings.thresholds.cameraOfflineCooldownMinutes} onChange={(event) => patchThreshold("cameraOfflineCooldownMinutes", Number(event.target.value))} />
+            </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-4">
             <Toggle checked={settings.toggles.emailAlerts} onChange={(value) => patchToggle("emailAlerts", value)} label="Email alerts" description="Send an email for every newly triggered alert." />
@@ -248,12 +260,14 @@ export default function AlertsSettings() {
             <Toggle checked={settings.toggles.power} onChange={(value) => patchToggle("power", value)} label="Power / low voltage" description="Power cut or external voltage drop." />
             <Toggle checked={settings.toggles.geofence} onChange={(value) => patchToggle("geofence", value)} label="Geofence entry/exit" description="Zone entry and exit transitions." />
             <Toggle checked={settings.toggles.security} onChange={(value) => patchToggle("security", value)} label="Jamming / SOS / DIN" description="Jamming, immobilizer, SOS and digital-input triggers." />
+            <Toggle checked={settings.toggles.fuelCard} onChange={(value) => patchToggle("fuelCard", value)} label="Fuel card anomalies" description="Card status, tank capacity, limits and GPS mismatch on swipes." />
+            <Toggle checked={settings.toggles.cameraOffline} onChange={(value) => patchToggle("cameraOffline", value)} label="Camera offline / unreachable" description="Email when a camera feed has not been reachable within the camera offline window." />
           </div>
         </div>
 
         <div className="panel p-5">
           <div className="text-sm font-semibold text-ink-100">Scheduled report forwarding</div>
-          <p className="text-[11px] text-ink-500 mt-1">Five CSV reports are attached to each scheduled fleet summary. Times are Port Moresby (UTC+10).</p>
+          <p className="text-[11px] text-ink-500 mt-1">Six CSV reports are attached to each scheduled fleet summary. Times are Port Moresby (UTC+10).</p>
           <div className="space-y-3 mt-4">
             {[
               { key: "daily" as const, label: "Daily summary" },

@@ -115,10 +115,19 @@ export default function LiveFleetMap() {
 
   function onIframeLoad(event: SyntheticEvent<HTMLIFrameElement>) {
     try {
-      const text = event.currentTarget.contentDocument?.body?.innerText ?? "";
-      if (text.length < 2000 && /basic realm|invalid or expired token|missing fms token|unauthorized/i.test(text)) {
+      const text = event.currentTarget.contentDocument?.body?.innerText?.trim() ?? "";
+      if (text.length >= 2000) return;
+      if (/basic realm|invalid or expired token|missing fms token|unauthorized/i.test(text)) {
         setMapMode("native");
         setMapError("MeshSat map authentication failed; showing the FMS live map instead.");
+        return;
+      }
+      // The proxy returns small JSON error bodies when the upstream map is
+      // unreachable. Rendering those raw in the iframe looks like a broken
+      // page, so fall back to the native map with a readable message.
+      if (/^\s*\{[\s\S]*"error"\s*:/i.test(text) || /upstream unreachable|bad gateway|service unavailable/i.test(text)) {
+        setMapMode("native");
+        setMapError("MeshSat map could not be loaded; showing the FMS live map instead.");
       }
     } catch {
       // Cross-origin iframe (override mode); leave it alone.
@@ -297,7 +306,7 @@ export default function LiveFleetMap() {
           Live map unavailable
         </div>
       ) : mapMode === "native" ? (
-        <FleetLiveMap onEmptyChange={handleNativeEmpty} />
+        <FleetLiveMap onEmptyChange={handleNativeEmpty} onOpenMeshSat={() => void openMeshSatMap()} />
       ) : (
         <div className="bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
           {mapUrl ? (

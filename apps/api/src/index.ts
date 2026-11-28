@@ -40,8 +40,11 @@ import settingsRoutes from "./routes/settings";
 import deviceConfigRoutes from "./routes/deviceConfig";
 import reportsRoutes from "./routes/reports";
 import alertSettingsRoutes from "./routes/alertSettings";
+import fuelCardsRoutes from "./routes/fuelCards";
+import camerasRoutes from "./routes/cameras";
 import { startAlertMonitor } from "./services/fleetAlerts";
 import { startReportScheduler } from "./services/reportScheduler";
+import { startCameraMonitor } from "./services/cameras";
 
 initSchema();
 ensureBootstrapAccounts();
@@ -94,6 +97,8 @@ app.use("/api/v1/driver-intelligence", driverIntelligenceRoutes);
 app.use("/api/v1/settings", settingsRoutes);
 app.use("/api/v1/reports", reportsRoutes);
 app.use("/api/v1/alert-settings", alertSettingsRoutes);
+app.use("/api/v1/fuel-cards", fuelCardsRoutes);
+app.use("/api/v1/cameras", camerasRoutes);
 // Remote FMB125 configuration. `/api/devices` is the documented path; the
 // `/api/v1/devices` alias lets the SPA reuse its normal token-refresh client.
 app.use("/api/devices", deviceConfigRoutes);
@@ -116,6 +121,7 @@ app.listen(PORT, () => {
   console.log(`Fleet Management System API listening on port ${PORT}`);
   startAlertMonitor();
   startReportScheduler();
+  startCameraMonitor();
 });
 
 export default app;

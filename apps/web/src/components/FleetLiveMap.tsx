@@ -33,7 +33,9 @@ function fmtTime(value: string | null): string {
   const hasZone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(value);
   const normalized = hasZone ? value : value.replace(" ", "T") + "Z";
   const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleTimeString("en-AU", { timeZone: "Pacific/Port_Moresby", hour12: false });
 }
 
 function MapFocus({
@@ -65,7 +67,13 @@ function MapFocus({
   return null;
 }
 
-export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty: boolean) => void }) {
+export default function FleetLiveMap({
+  onEmptyChange,
+  onOpenMeshSat,
+}: {
+  onEmptyChange?: (empty: boolean) => void;
+  onOpenMeshSat?: () => void;
+}) {
   const [vehicles, setVehicles] = useState<TelemetryLatest[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -171,14 +179,26 @@ export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty
           </div>
           <div className="text-[10px] text-ink-500">
             {lastRefresh
-              ? `Updated ${lastRefresh.toLocaleTimeString()} · ${locatedCount} with GPS fix · auto-refresh 15s`
+              ? `Updated ${lastRefresh.toLocaleTimeString("en-AU", { timeZone: "Pacific/Port_Moresby", hour12: false })} PGT · ${locatedCount} with GPS fix · auto-refresh 15s`
               : "Waiting for positions…"}
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto divide-y divide-base-800">
           {filtered.length === 0 ? (
-            <div className="p-4 text-xs text-ink-500">No vehicles match this filter.</div>
+            <div className="p-4 text-xs text-ink-500">
+              {vehicles.length === 0 ? (
+                <>
+                  No FMS vehicles are registered yet.{" "}
+                  <Link to="/vehicles" className="text-amber-400 hover:text-amber-300">
+                    Add a vehicle
+                  </Link>
+                  .
+                </>
+              ) : (
+                "No vehicles match this filter."
+              )}
+            </div>
           ) : (
             filtered.map((vehicle) => {
               const state = vehicleState(vehicle);
@@ -203,7 +223,7 @@ export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty
                   <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-400">
                     <span>{vehicle.speed != null ? `${vehicle.speed} km/h` : "Speed —"}</span>
                     <span>{vehicle.lat != null && vehicle.lon != null ? "GPS fix" : "No fix"}</span>
-                    <span>Seen {fmtTime(vehicle.last_seen_at)}</span>
+                    <span>Seen {fmtTime(vehicle.last_seen_at ?? vehicle.recorded_at)}</span>
                   </div>
                 </button>
               );
@@ -244,7 +264,7 @@ export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty
                       </div>
                       <div>Speed: {vehicle.speed != null ? `${vehicle.speed} km/h` : "—"}</div>
                       <div>Ignition: {vehicle.ignition === 1 ? "ON" : "OFF"}</div>
-                      <div>Last seen: {fmtTime(vehicle.last_seen_at)}</div>
+                      <div>Last seen: {fmtTime(vehicle.last_seen_at ?? vehicle.recorded_at)}</div>
                       <div className="flex gap-2 pt-1">
                         <Link
                           to={`/vehicles/${encodeURIComponent(vehicle.vehicle_id)}`}
@@ -277,14 +297,28 @@ export default function FleetLiveMap({ onEmptyChange }: { onEmptyChange?: (empty
           </MapContainer>
 
           {!loading && !error && located.length === 0 && (
-            <div className="absolute inset-0 z-[500] flex items-center justify-center bg-base-950/70">
-              <div className="panel p-4 max-w-sm text-center">
-                <div className="text-sm font-semibold text-ink-100">Waiting for GPS positions</div>
-                <p className="text-xs text-ink-500 mt-1">
-                  {vehicles.length === 0
-                    ? "No vehicle has reported a position yet. The map updates automatically."
-                    : "The matching vehicles have no GPS fix yet. Clear the filter or wait for the next tracker report."}
-                </p>
+            <div className="absolute inset-0 z-[500] flex items-center justify-center bg-base-950/70 p-4">
+              <div className="panel p-4 max-w-sm text-center space-y-3">
+                <div>
+                  <div className="text-sm font-semibold text-ink-100">No FMS positions to plot</div>
+                  <p className="text-xs text-ink-500 mt-1">
+                    {vehicles.length === 0
+                      ? "No FMS vehicles are registered yet. Add a vehicle and bind its tracker to see it here."
+                      : filtered.length === 0
+                        ? "No vehicles match this filter. Clear the search or status filter."
+                        : "The matching vehicles have no GPS fix yet. Clear the filter or wait for the next tracker report."}
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {onOpenMeshSat && (
+                    <button onClick={onOpenMeshSat} className="btn-secondary text-xs px-3 py-1.5">
+                      Open MeshSat map
+                    </button>
+                  )}
+                  <Link to="/vehicles" className="btn-secondary text-xs px-3 py-1.5">
+                    Vehicles Register
+                  </Link>
+                </div>
               </div>
             </div>
           )}

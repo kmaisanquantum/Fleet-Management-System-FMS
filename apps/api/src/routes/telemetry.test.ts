@@ -349,6 +349,16 @@ describe("Telemetry router", () => {
     expect(features.body.data.last_seen_at).toBeTruthy();
   });
 
+  it("falls back to the last GPS fix when last_seen_at is missing", async () => {
+    db.prepare("UPDATE vehicles SET last_seen_at = NULL, last_gps_fix_at = datetime('now') WHERE id = ?").run(vehicleAId);
+    const { body } = await get("/latest", adminToken);
+    const row = body.data.find((v: any) => v.vehicle_id === vehicleAId);
+    expect(row.last_seen_at).toBeTruthy();
+    expect(row.online).toBe(true);
+    expect(row.imei).toBe(imeiA);
+    db.prepare("UPDATE vehicles SET last_seen_at = datetime('now', '-30 minutes') WHERE id = ?").run(vehicleAId);
+  });
+
   it("scopes GET /summary to the caller's client", async () => {
     const admin = await get("/summary?from=2026-03-28&to=2026-03-29", adminToken);
     expect(admin.status).toBe(200);

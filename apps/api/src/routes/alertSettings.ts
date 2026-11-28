@@ -39,6 +39,9 @@ function currentSettings() {
       offlineMinutes: numSetting("alert_offline_minutes", 15),
       offlineCooldownMinutes: numSetting("alert_offline_cooldown_minutes", 360),
       idleMinutes: numSetting("alert_idle_minutes", 10),
+      fuelCardDistanceKm: numSetting("fuel_card_distance_threshold_km", 2),
+      cameraOfflineMinutes: numSetting("camera_offline_minutes", 15),
+      cameraOfflineCooldownMinutes: numSetting("camera_offline_cooldown_minutes", 360),
     },
     toggles: {
       emailAlerts: boolSetting("alert_email_enabled", true),
@@ -48,6 +51,8 @@ function currentSettings() {
       power: boolSetting("alert_power_enabled", true),
       geofence: boolSetting("alert_geofence_enabled", true),
       security: boolSetting("alert_security_enabled", true),
+      fuelCard: boolSetting("alert_fuel_card_enabled", true),
+      cameraOffline: boolSetting("alert_camera_offline_enabled", true),
     },
     schedule: {
       dailyEnabled: boolSetting("report_daily_enabled", true),
@@ -77,6 +82,9 @@ const updateSchema = z.object({
       offlineMinutes: z.number().int().min(1).max(10080).optional(),
       offlineCooldownMinutes: z.number().int().min(1).max(10080).optional(),
       idleMinutes: z.number().int().min(1).max(1440).optional(),
+      fuelCardDistanceKm: z.number().min(0).max(1000).optional(),
+      cameraOfflineMinutes: z.number().int().min(1).max(10080).optional(),
+      cameraOfflineCooldownMinutes: z.number().int().min(1).max(10080).optional(),
     })
     .optional(),
   toggles: z
@@ -88,6 +96,8 @@ const updateSchema = z.object({
       power: z.boolean().optional(),
       geofence: z.boolean().optional(),
       security: z.boolean().optional(),
+      fuelCard: z.boolean().optional(),
+      cameraOffline: z.boolean().optional(),
     })
     .optional(),
   schedule: z
@@ -145,6 +155,11 @@ router.put("/", (req, res, next) => {
       if (t.offlineMinutes !== undefined) setRule("alert_offline_minutes", String(t.offlineMinutes), "number");
       if (t.offlineCooldownMinutes !== undefined) setRule("alert_offline_cooldown_minutes", String(t.offlineCooldownMinutes), "number");
       if (t.idleMinutes !== undefined) setRule("alert_idle_minutes", String(t.idleMinutes), "number");
+      if (t.fuelCardDistanceKm !== undefined) setRule("fuel_card_distance_threshold_km", String(t.fuelCardDistanceKm), "number");
+      if (t.cameraOfflineMinutes !== undefined) setRule("camera_offline_minutes", String(t.cameraOfflineMinutes), "number");
+      if (t.cameraOfflineCooldownMinutes !== undefined) {
+        setRule("camera_offline_cooldown_minutes", String(t.cameraOfflineCooldownMinutes), "number");
+      }
     }
     if (input.toggles) {
       const t = input.toggles;
@@ -156,6 +171,8 @@ router.put("/", (req, res, next) => {
         power: "alert_power_enabled",
         geofence: "alert_geofence_enabled",
         security: "alert_security_enabled",
+        fuelCard: "alert_fuel_card_enabled",
+        cameraOffline: "alert_camera_offline_enabled",
       };
       for (const [key, rule] of Object.entries(map) as [keyof typeof t, string][]) {
         const value = t[key];

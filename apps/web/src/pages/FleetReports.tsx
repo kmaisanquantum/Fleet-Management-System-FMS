@@ -47,6 +47,7 @@ const REPORT_ICONS: Record<ReportType, string> = {
   "driver-behaviour": "⚡",
   "geofence-idle": "◎",
   "fuel-utilization": "⛽",
+  "fuel-cards": "💳",
   "device-health": "◉",
 };
 
