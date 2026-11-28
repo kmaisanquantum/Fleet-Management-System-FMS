@@ -5,6 +5,7 @@ export type ReportType =
   | "driver-behaviour"
   | "geofence-idle"
   | "fuel-utilization"
+  | "fuel-cards"
   | "device-health";
 
 export interface ReportColumn {
@@ -96,6 +97,9 @@ export interface AlertSettings {
     offlineMinutes: number;
     offlineCooldownMinutes: number;
     idleMinutes: number;
+    fuelCardDistanceKm: number;
+    cameraOfflineMinutes: number;
+    cameraOfflineCooldownMinutes: number;
   };
   toggles: {
     emailAlerts: boolean;
@@ -105,6 +109,8 @@ export interface AlertSettings {
     power: boolean;
     geofence: boolean;
     security: boolean;
+    fuelCard: boolean;
+    cameraOffline: boolean;
   };
   schedule: {
     dailyEnabled: boolean;

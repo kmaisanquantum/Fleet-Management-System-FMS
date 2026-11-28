@@ -7,6 +7,7 @@ export type ReportType =
   | "driver-behaviour"
   | "geofence-idle"
   | "fuel-utilization"
+  | "fuel-cards"
   | "device-health";
 
 export interface ReportFilters {
@@ -78,6 +79,11 @@ export const REPORT_TYPES: { type: ReportType; title: string; description: strin
     type: "fuel-utilization",
     title: "Fuel & Utilization",
     description: "Fuel logs, estimated consumption and vehicle utilization percentage.",
+  },
+  {
+    type: "fuel-cards",
+    title: "Fuel Card Reconciliation",
+    description: "Card swipes matched against vehicle GPS, limits and card status, with flagged anomalies.",
   },
   {
     type: "device-health",
@@ -934,6 +940,144 @@ function buildFuelUtilization(vehicles: VehicleRow[], period: ReportPeriod, filt
   };
 }
 
+function buildFuelCardReconciliation(
+  vehicles: VehicleRow[],
+  period: ReportPeriod,
+  filters: ReportFilters,
+  scopes: string[] | null
+): ReportResult {
+  const vehicleSet = new Set(vehicles.map((vehicle) => vehicle.id));
+  const transactions = db
+    .prepare(
+      `SELECT t.*, fc.provider, fc.status AS card_status,
+              COALESCE(fc.assigned_vehicle_id, fc.vehicle_id) AS card_vehicle_id,
+              v.vehicle_number, v.registration_number, v.department, v.client_id
+       FROM fuel_card_transactions t
+       LEFT JOIN fuel_cards fc ON fc.id = t.fuel_card_id
+       LEFT JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE datetime(t.transaction_at) >= datetime(?) AND datetime(t.transaction_at) <= datetime(?)
+       ORDER BY t.transaction_at DESC`
+    )
+    .all(period.fromUtc, period.toUtc) as any[];
+
+  const visible = transactions.filter((row) => {
+    if (!scopes || scopes.length === 0) return true;
+    return Boolean(
+      (row.vehicle_id && vehicleSet.has(row.vehicle_id)) || (row.card_vehicle_id && vehicleSet.has(row.card_vehicle_id))
+    );
+  });
+
+  const totalLitres = visible.reduce((sum, row) => sum + Number(row.liters ?? 0), 0);
+  const totalAmount = visible.reduce((sum, row) => sum + Number(row.amount ?? 0), 0);
+  const flagged = visible.filter((row) => row.status === "flagged");
+  const matched = visible.filter((row) => row.status === "matched");
+  const cards = new Map<string, any>();
+
+  for (const row of visible) {
+    const key = row.card_number;
+    const current = cards.get(key) ?? {
+      card_number: row.card_number,
+      provider: row.provider,
+      card_status: row.card_status,
+      vehicle: row.vehicle_number,
+      registration: row.registration_number,
+      department: row.department,
+      transactions: 0,
+      litres: 0,
+      amount: 0,
+      flagged: 0,
+      last_transaction: row.transaction_at,
+    };
+    current.transactions += 1;
+    current.litres += Number(row.liters ?? 0);
+    current.amount += Number(row.amount ?? 0);
+    if (row.status === "flagged") current.flagged += 1;
+    if (!current.last_transaction || String(row.transaction_at) > String(current.last_transaction)) current.last_transaction = row.transaction_at;
+    cards.set(key, current);
+  }
+
+  const summaryRows = [...cards.values()]
+    .map((row) => ({
+      ...row,
+      litres: round(row.litres, 2),
+      amount: round(row.amount, 2),
+    }))
+    .sort((a, b) => b.flagged - a.flagged || b.amount - a.amount);
+
+  const transactionRows = visible.map((row) => ({
+    transaction_at: row.transaction_at,
+    card_number: row.card_number,
+    provider: row.provider,
+    vehicle: row.vehicle_number,
+    registration: row.registration_number,
+    station: row.station_name,
+    litres: round(Number(row.liters ?? 0), 2),
+    amount: row.amount != null ? round(Number(row.amount), 2) : null,
+    distance_km: row.distance_km != null ? round(Number(row.distance_km), 2) : null,
+    status: row.status,
+    flag_reason: row.flag_reason,
+  }));
+
+  return {
+    type: "fuel-cards",
+    title: reportTitle("fuel-cards"),
+    generatedAt: new Date().toISOString(),
+    period,
+    filters,
+    kpis: [
+      { key: "transactions", label: "Card swipes", value: String(visible.length) },
+      { key: "matched", label: "Matched", value: String(matched.length), tone: "good" },
+      { key: "flagged", label: "Flagged", value: String(flagged.length), tone: flagged.length > 0 ? "danger" : "good" },
+      { key: "litres", label: "Litres", value: `${fmtNum(totalLitres, 2)} L` },
+      { key: "amount", label: "Card spend", value: `PGK ${fmtNum(totalAmount, 2)}` },
+      {
+        key: "flag_rate",
+        label: "Flag rate",
+        value: `${fmtNum(visible.length ? (flagged.length / visible.length) * 100 : 0)}%`,
+        tone: flagged.length > 0 ? "warn" : "good",
+      },
+    ],
+    sections: [
+      {
+        key: "summary",
+        title: "Reconciliation by fuel card",
+        columns: [
+          { key: "card_number", label: "Card" },
+          { key: "provider", label: "Provider" },
+          { key: "card_status", label: "Card status" },
+          { key: "vehicle", label: "Vehicle" },
+          { key: "registration", label: "Registration" },
+          { key: "department", label: "Depot / department" },
+          { key: "transactions", label: "Swipes", format: "number" },
+          { key: "litres", label: "Litres", format: "decimal" },
+          { key: "amount", label: "Amount (PGK)", format: "currency" },
+          { key: "flagged", label: "Flagged", format: "number" },
+          { key: "last_transaction", label: "Last swipe", format: "date" },
+        ],
+        rows: summaryRows,
+      },
+      {
+        key: "transactions",
+        title: "Fuel card transaction log",
+        columns: [
+          { key: "transaction_at", label: "Transaction time", format: "date" },
+          { key: "card_number", label: "Card" },
+          { key: "provider", label: "Provider" },
+          { key: "vehicle", label: "Vehicle" },
+          { key: "registration", label: "Registration" },
+          { key: "station", label: "Station" },
+          { key: "litres", label: "Litres", format: "decimal" },
+          { key: "amount", label: "Amount (PGK)", format: "currency" },
+          { key: "distance_km", label: "GPS distance (km)", format: "decimal" },
+          { key: "status", label: "Status" },
+          { key: "flag_reason", label: "Flag reason" },
+        ],
+        rows: transactionRows,
+      },
+    ],
+  };
+}
+
 function buildDeviceHealth(vehicles: VehicleRow[], period: ReportPeriod, filters: ReportFilters, scopes: string[] | null): ReportResult {
   const where = vehicleWhere(filters, scopes);
   const devices = db.prepare(`
@@ -1091,6 +1235,8 @@ export function buildReport(type: ReportType, filters: ReportFilters, scopes: st
       return buildGeofenceIdle(vehicles, period, fences, filters);
     case "fuel-utilization":
       return buildFuelUtilization(vehicles, period, filters);
+    case "fuel-cards":
+      return buildFuelCardReconciliation(vehicles, period, filters, scopes);
     case "device-health":
       return buildDeviceHealth(vehicles, period, filters, scopes);
     default:

@@ -171,7 +171,7 @@ describe("Fleet reporting and alert settings", () => {
   });
 
   it("builds every report type without SQL or shape errors", async () => {
-    const types = ["trip-mileage", "driver-behaviour", "geofence-idle", "fuel-utilization", "device-health"];
+    const types = ["trip-mileage", "driver-behaviour", "geofence-idle", "fuel-utilization", "fuel-cards", "device-health"];
     for (const type of types) {
       const res = await get(
         `/api/v1/reports/${type}?from=2026-03-01T00:00&to=2026-03-01T23:59&vehicleId=${vehicleId}`,

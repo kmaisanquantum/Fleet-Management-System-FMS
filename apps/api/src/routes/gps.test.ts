@@ -104,8 +104,8 @@ describe("Legacy GPS ingest", () => {
     expect(after).toBeGreaterThan(before);
 
     const alert = db
-      .prepare("SELECT alert_type, severity, vehicle_id FROM fleet_alerts ORDER BY created_at DESC LIMIT 1")
-      .get() as { alert_type: string; severity: string; vehicle_id: string };
+      .prepare("SELECT alert_type, severity, vehicle_id FROM fleet_alerts WHERE vehicle_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(vehicleId) as { alert_type: string; severity: string; vehicle_id: string };
     expect(alert.vehicle_id).toBe(vehicleId);
     expect(alert.alert_type).toBe("overspeed");
     expect(alert.severity).toBe("warning");

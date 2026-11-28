@@ -702,15 +702,20 @@ router.get("/latest", (req, res, next) => {
         v.current_latitude AS lat,
         v.current_longitude AS lon,
         v.current_fuel_level_pct AS fuel_level_pct,
-        v.last_gps_fix_at AS recorded_at,
-        v.last_seen_at,
+        COALESCE(v.last_gps_fix_at, gp.recorded_at) AS recorded_at,
+        COALESCE(v.last_seen_at, v.last_gps_fix_at, gp.recorded_at) AS last_seen_at,
         vsv.computed_status,
         gp.speed,
         gp.heading,
         gp.ignition,
         gp.sats,
         gp.fuel_liters,
-        gp.imei,
+        COALESCE(gp.imei, (
+          SELECT g.device_identifier FROM gps_devices g
+          WHERE g.vehicle_id = v.id
+          ORDER BY CASE WHEN g.status = 'active' THEN 0 ELSE 1 END, g.last_seen_at DESC
+          LIMIT 1
+        )) AS imei,
         gp.gsm_signal,
         gp.source,
         gp.io_json

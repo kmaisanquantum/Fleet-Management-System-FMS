@@ -41,6 +41,7 @@ const NAV_GROUPS: {
       { to: "/drivers", label: "Driver Register" },
       { to: "/fleet-allocations", label: "Allocations" },
       { to: "/fleet-fuel", label: "Vehicle Fuel Logs" },
+      { to: "/fuel-cards", label: "Fuel Cards" },
       { to: "/fleet-trips", label: "Trips & Mileage" },
       { to: "/fleet-inspections", label: "Daily Inspections" },
       { to: "/fleet-maintenance", label: "Maintenance & Repairs" },
@@ -49,7 +50,10 @@ const NAV_GROUPS: {
   },
   {
     title: "Device Management",
-    items: [{ to: "/device-configurator", label: "FMB125 Configurator" }],
+    items: [
+      { to: "/device-configurator", label: "FMB125 Configurator" },
+      { to: "/cameras", label: "Cameras" },
+    ],
   },
   {
     title: "Administration",
