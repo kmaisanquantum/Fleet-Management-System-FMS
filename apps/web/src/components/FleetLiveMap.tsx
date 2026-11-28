@@ -1,15 +1,32 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { telemetryApi, TelemetryLatest } from "../api/telemetry";
 
 const DEFAULT_CENTER: [number, number] = [-9.4438, 147.1803];
-const TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}";
-const TILE_ATTRIBUTION =
-  '&copy; <a href="https://www.esri.com/">Esri</a>, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, ' +
-  "Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, " +
-  "&copy; OpenStreetMap contributors, and the GIS User Community";
+const TILE_PROVIDERS = [
+  {
+    name: "Esri Street",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      '&copy; <a href="https://www.esri.com/">Esri</a>, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, ' +
+      "Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, " +
+      "&copy; OpenStreetMap contributors, and the GIS User Community",
+  },
+  {
+    name: "Esri Topo",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      '&copy; <a href="https://www.esri.com/">Esri</a>, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, ' +
+      "&copy; OpenStreetMap contributors, and the GIS User Community",
+  },
+  {
+    name: "OpenStreetMap",
+    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+] as const;
 
 type VehicleState = "moving" | "idle" | "stationary" | "offline";
 
@@ -65,6 +82,37 @@ function MapFocus({
   }, [focusKey, map]);
 
   return null;
+}
+
+/**
+ * Switches basemap providers if tiles repeatedly fail, so a blocked CDN does
+ * not leave the map blank or surface raw Leaflet tile errors.
+ */
+function ResilientTileLayer() {
+  const [providerIndex, setProviderIndex] = useState(0);
+  const tileErrorsRef = useRef(0);
+
+  const handleTileError = useCallback(() => {
+    tileErrorsRef.current += 1;
+    if (tileErrorsRef.current < 4) return;
+    tileErrorsRef.current = 0;
+    setProviderIndex((current) => (current + 1 < TILE_PROVIDERS.length ? current + 1 : current));
+  }, []);
+
+  const handleTileLoad = useCallback(() => {
+    tileErrorsRef.current = 0;
+  }, []);
+
+  const provider = TILE_PROVIDERS[providerIndex];
+  return (
+    <TileLayer
+      key={provider.url}
+      url={provider.url}
+      attribution={provider.attribution}
+      maxZoom={19}
+      eventHandlers={{ tileerror: handleTileError, tileload: handleTileLoad }}
+    />
+  );
 }
 
 export default function FleetLiveMap({
@@ -233,10 +281,14 @@ export default function FleetLiveMap({
       </aside>
 
       <div className="flex-1 min-w-0 space-y-3">
-        {error && <div className="p-3 rounded-lg bg-signal-red/10 text-signal-red text-xs">{error}</div>}
         <div className="relative bg-base-900 border border-base-700 rounded-xl overflow-hidden h-[calc(100vh-200px)] min-h-[520px]">
+          {error && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1000] max-w-[90%] rounded-lg border border-amber-400/40 bg-base-950/95 px-3 py-2 text-xs text-amber-300 shadow-lg">
+              Live positions unavailable. Retrying every 15s.
+            </div>
+          )}
           <MapContainer center={DEFAULT_CENTER} zoom={11} scrollWheelZoom className="w-full h-full">
-            <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
+            <ResilientTileLayer />
             <MapFocus focusKey={focusKey} points={points} selected={selectedPoint} />
             {markers.map((vehicle) => {
               const state = vehicleState(vehicle);

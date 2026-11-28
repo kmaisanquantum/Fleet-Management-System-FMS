@@ -48,13 +48,10 @@ export default function LiveFleetMap() {
   const [mapMode, setMapMode] = useState<"meshsat" | "native">(OVERRIDE_MAP_URL ? "meshsat" : "native");
   const [missingAuth, setMissingAuth] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
-  const [tileWarning, setTileWarning] = useState<string | null>(null);
   const iframeLoadedRef = useRef(false);
   const reloadInFlightRef = useRef(false);
   const autoFallbackRef = useRef(false);
   const authRetryCountRef = useRef(0);
-  const tileErrorCountRef = useRef(0);
-  const tileClearTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (OVERRIDE_MAP_URL) {
@@ -116,7 +113,8 @@ export default function LiveFleetMap() {
   function onIframeLoad(event: SyntheticEvent<HTMLIFrameElement>) {
     try {
       const text = event.currentTarget.contentDocument?.body?.innerText?.trim() ?? "";
-      if (text.length >= 2000) return;
+      // Check error signatures first: an upstream error page can still contain
+      // a large stack trace or wrapper HTML.
       if (/basic realm|invalid or expired token|missing fms token|unauthorized/i.test(text)) {
         setMapMode("native");
         setMapError("MeshSat map authentication failed; showing the FMS live map instead.");
@@ -150,8 +148,6 @@ export default function LiveFleetMap() {
       await rollMapSession(token);
       iframeLoadedRef.current = true;
       setMapError(null);
-      setTileWarning(null);
-      tileErrorCountRef.current = 0;
       setMapMode("meshsat");
       // The cache-buster forces a fresh iframe navigation after the session
       // cookie has been rolled forward.
@@ -175,7 +171,6 @@ export default function LiveFleetMap() {
       return;
     }
     setMapError(null);
-    setTileWarning(null);
     authRetryCountRef.current = 0;
     try {
       const res = await fetch(MAP_HEALTH_PATH, {
@@ -198,7 +193,6 @@ export default function LiveFleetMap() {
   const showNativeMap = useCallback(() => {
     setMapMode("native");
     setMapError(null);
-    setTileWarning(null);
   }, []);
 
   const handleNativeEmpty = useCallback(() => {
@@ -210,52 +204,21 @@ export default function LiveFleetMap() {
   useEffect(() => {
     if (OVERRIDE_MAP_URL) return;
 
-    function clearTileWarning() {
-      tileErrorCountRef.current = 0;
-      setTileWarning(null);
-      if (tileClearTimerRef.current !== null) {
-        window.clearTimeout(tileClearTimerRef.current);
-        tileClearTimerRef.current = null;
-      }
-    }
-
     function onMessage(event: MessageEvent) {
       if (event.origin !== window.location.origin) return;
-      const type = event.data?.type;
-      if (type === "fms-map-auth-error") {
-        setTileWarning(null);
-        if (authRetryCountRef.current >= 2) {
-          setMapMode("native");
-          setMapError("The live map session expired; showing the FMS live map instead.");
-          return;
-        }
-        authRetryCountRef.current += 1;
-        setMapError("The live map session expired. Reconnecting…");
-        void reloadMap();
-      } else if (type === "fms-map-tile-error") {
-        // One failed tile is usually transient; only surface a banner once
-        // several tiles fail, and clear it automatically when tiles recover.
-        tileErrorCountRef.current += 1;
-        if (tileErrorCountRef.current >= 3) {
-          setTileWarning("Some map tiles are retrying in the background.");
-          if (tileClearTimerRef.current !== null) window.clearTimeout(tileClearTimerRef.current);
-          tileClearTimerRef.current = window.setTimeout(() => setTileWarning(null), 10_000);
-        }
-      } else if (type === "fms-map-tile-ok") {
-        if (tileErrorCountRef.current > 0) clearTileWarning();
-      } else if (type === "fms-map-ready") {
-        clearTileWarning();
+      if (event.data?.type !== "fms-map-auth-error") return;
+      if (authRetryCountRef.current >= 2) {
+        setMapMode("native");
+        setMapError("The live map session expired; showing the FMS live map instead.");
+        return;
       }
+      authRetryCountRef.current += 1;
+      setMapError("The live map session expired. Reconnecting…");
+      void reloadMap();
     }
 
     window.addEventListener("message", onMessage);
-    return () => {
-      window.removeEventListener("message", onMessage);
-      if (tileClearTimerRef.current !== null) {
-        window.clearTimeout(tileClearTimerRef.current);
-        tileClearTimerRef.current = null;
-      }
-    };
+    return () => window.removeEventListener("message", onMessage);
   }, [reloadMap]);
 
   return (
@@ -289,14 +252,14 @@ export default function LiveFleetMap() {
         </p>
       )}
 
-      {(mapError || tileWarning) && (
+      {mapError && (
         <div className="flex items-center justify-between gap-3 p-3 rounded-lg border border-amber-400/40 bg-amber-400/10 text-amber-300 text-xs">
-          <span>{mapError ?? tileWarning}</span>
+          <span>{mapError}</span>
           <button
-            onClick={() => void (mapError && mapMode === "native" ? openMeshSatMap() : reloadMap())}
+            onClick={() => void (mapMode === "native" ? openMeshSatMap() : reloadMap())}
             className="btn-secondary text-xs px-3 py-1.5 whitespace-nowrap"
           >
-            {mapError && mapMode === "native" ? "Try MeshSat" : "Retry"}
+            {mapMode === "native" ? "Try MeshSat" : "Retry"}
           </button>
         </div>
       )}
